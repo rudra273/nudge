@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nudge-bot"
+version = "0.1.0"
+description = "Tell Nudge what to watch. Nudge tells you when it happens."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "PyYAML>=6.0",
+    "croniter>=2.0",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+nudge = "nudge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nudge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

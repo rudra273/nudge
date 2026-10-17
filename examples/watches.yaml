@@ -1,0 +1,49 @@
+# Copy to ./watches.yaml (or set NUDGE_WATCHES) and edit. Every field except url is optional.
+# Nudge alerts when a condition flips from false to true, so you get one nudge per event, not one per check.
+watches:
+  # Ticket drop: alert when "Sold out" disappears from the booking area.
+  - id: dune70
+    name: Dune IMAX tickets
+    url: https://tickets.example.com/movies/dune-part-three
+    check: keyword
+    params:
+      text: Sold out
+      absent: true
+      selector: "#booking"
+    interval: 5m
+    notify_once: true
+
+  # Product restock: alert when the add-to-cart button exists.
+  - id: ps6
+    name: Console restock
+    url: https://shop.example.com/products/console
+    check: selector
+    params:
+      selector: "button.add-to-cart:not([disabled])"
+    interval: 10m
+
+  # Registration opens, via a JSON API.
+  - id: marath
+    name: City marathon registration
+    url: https://api.example.com/v1/events/marathon
+    check: json
+    params:
+      path: data.registration.open
+      op: truthy
+    cron: "*/15 6-23 * * *"   # UTC
+
+  # New release on GitHub.
+  - id: relnot
+    name: New release of my favourite tool
+    url: https://api.github.com/repos/OWNER/REPO/releases/latest
+    check: change
+    params:
+      path: tag_name
+    interval: 1h
+
+  # Site goes live.
+  - id: launch
+    name: Conference site live
+    url: https://conf.example.com
+    check: status
+    interval: 30m
