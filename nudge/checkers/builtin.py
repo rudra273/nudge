@@ -1,4 +1,4 @@
-"""Built-in checkers: status, keyword, selector, json, change."""
+"""Built-in checkers: status, keyword, selector, json, change, booking."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def check_status(watch, ctx: CheckContext) -> CheckResult:
     want_down = bool(p.get("down"))
     expected = p.get("status")
     try:
-        resp = ctx.fetch(watch)
+        resp = ctx.fetch(watch, allow_error=True)
         if expected is not None:
             codes = expected if isinstance(expected, list) else [expected]
             up = resp.status in [int(c) for c in codes]
@@ -181,3 +181,61 @@ def check_change(watch, ctx: CheckContext) -> CheckResult:
     if previous != fp:
         return CheckResult(True, f"Content changed: {text[:200]}", fingerprint=fp, edge=False)
     return CheckResult(False, "No change", fingerprint=fp, edge=False)
+
+
+# -- booking -----------------------------------------------------------------
+
+OPEN_PHRASES = ("book tickets", "book ticket", "book now", "buy tickets", "buy ticket", "buy now", "get tickets",
+                "register now", "select seats", "add to cart", "reserve now", "book seats")
+CLOSED_PHRASES = ("sold out", "coming soon", "notify me", "i'm interested", "i\u2019m interested", "registrations closed",
+                  "booking closed", "bookings closed", "out of stock", "currently unavailable")
+SHOWTIME_RE = re.compile(r"\b(?:[01]?\d):[0-5]\d\s?(?:AM|PM)\b", re.I)
+
+
+def booking_state(resp: Response, open_phrases=OPEN_PHRASES, closed_phrases=CLOSED_PHRASES) -> tuple[bool, str]:
+    """Look at clickable elements (buttons/links) for a booking call-to-action. Returns (open, reason)."""
+    labels = []
+    for node in resp.soup.select("button, a, [role=button], input[type=submit]"):
+        label = (node.get_text(" ", strip=True) or node.get("value") or node.get("aria-label") or "").strip()
+        if label and len(label) <= 40:
+            labels.append(label)
+    lowered = [lbl.lower() for lbl in labels]
+    for phrase in open_phrases:
+        for raw, low in zip(labels, lowered):
+            if low == phrase or low.startswith(phrase + " ") or (len(phrase) > 8 and phrase in low):
+                return True, f'"{raw}" button is live'
+    for phrase in closed_phrases:
+        for raw, low in zip(labels, lowered):
+            if phrase in low:
+                return False, f'Page shows "{raw}"'
+    text = resp.soup.get_text(" ", strip=True).lower()
+    for phrase in closed_phrases:
+        if phrase in text:
+            return False, f'Page says "{phrase}"'
+    return False, "No booking button yet"
+
+
+@checker("booking")
+def check_booking(watch, ctx: CheckContext) -> CheckResult:
+    """Matched when a ticket/registration page shows a live "Book"/"Buy"/"Register" button.
+
+    Works on most booking pages (BookMyShow, District, Insider, Ticketmaster, college fests...).
+    params: open_text / closed_text to override the phrases, showtimes: true to require showtimes.
+    """
+    p = watch.params
+    resp = ctx.fetch(watch)
+    if p.get("showtimes"):
+        times = SHOWTIME_RE.findall(resp.soup.get_text(" ", strip=True))
+        if times:
+            return CheckResult(True, f"Showtimes are up: {', '.join(dict.fromkeys(times[:6]))}")
+        return CheckResult(False, "No showtimes yet")
+    opens = [s.lower() for s in _as_list(p.get("open_text"))] or OPEN_PHRASES
+    closes = [s.lower() for s in _as_list(p.get("closed_text"))] or CLOSED_PHRASES
+    is_open, reason = booking_state(resp, tuple(opens), tuple(closes))
+    return CheckResult(is_open, f"Bookings are open: {reason}" if is_open else reason)
+
+
+def _as_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    return [value] if isinstance(value, str) else [str(v) for v in value]

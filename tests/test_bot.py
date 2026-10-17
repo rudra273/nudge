@@ -37,7 +37,7 @@ def test_watch_lifecycle(store):
 
 def test_errors_are_friendly(store):
     assert "No watch" in handle_text("/pause zzz", store, SETTINGS)
-    assert "URL" in handle_text("tell me when tickets drop", store, SETTINGS)
+    assert "link" in handle_text("tell me when tickets drop", store, SETTINGS)
     assert "Usage" in handle_text("/pause", store, SETTINGS)
     assert "Unknown command" in handle_text("/frobnicate", store, SETTINGS)
 

@@ -11,7 +11,7 @@ from typing import Callable
 from croniter import croniter
 
 from nudge.checkers import CheckContext, CheckResult, get_checker
-from nudge.checkers.base import Fetcher, http_fetch
+from nudge.checkers.base import BROWSER_UA, Fetcher, http_fetch
 from nudge.models import Watch, parse_duration
 from nudge.store import Store
 from nudge.telegram import esc
@@ -46,7 +46,7 @@ class Outcome:
 
 
 def format_alert(watch: Watch, result: CheckResult) -> str:
-    lines = [f"🔔 <b>{esc(watch.name)}</b>", esc(result.summary), f"🔗 {esc(watch.url)}"]
+    lines = [f"🔔 <b>{esc(watch.name)}</b>", esc(result.summary), f"🔗 {esc(result.link or watch.url)}"]
     if watch.notify_once:
         lines.append("<i>Watch paused (notify once). /resume " + esc(watch.id) + " to re-arm.</i>")
     return "\n".join(lines)
@@ -58,10 +58,13 @@ def format_error(watch: Watch, error: str, count: int) -> str:
 
 
 def run_watch(store: Store, watch: Watch, notify: Notify | None = None, *, now: float | None = None,
-              fetcher: Fetcher = http_fetch, timeout: float = 20.0, user_agent: str = "NudgeBot") -> Outcome:
+              fetcher: Fetcher = http_fetch, timeout: float = 20.0, user_agent: str = BROWSER_UA,
+              browser: bool = False) -> Outcome:
     now = time.time() if now is None else now
     state = store.state_for(watch)
-    ctx = CheckContext(previous=dict(state), fetcher=fetcher, timeout=timeout, user_agent=user_agent)
+    memo = dict(state.get("memo") or {})
+    ctx = CheckContext(previous=dict(state), fetcher=fetcher, timeout=timeout, user_agent=user_agent,
+                       browser=browser, memo=memo)
     state["last_checked"] = now
     try:
         result = get_checker(watch.check)(watch, ctx)
@@ -76,6 +79,10 @@ def run_watch(store: Store, watch: Watch, notify: Notify | None = None, *, now: 
 
     was_matched = bool(state.get("matched"))
     state.update(matched=result.matched, summary=result.summary, errors=0)
+    if memo:
+        state["memo"] = memo
+    if result.link:
+        state["link"] = result.link
     state.pop("last_error", None)
     if result.fingerprint is not None:
         state["fingerprint"] = result.fingerprint

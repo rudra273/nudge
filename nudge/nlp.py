@@ -1,18 +1,21 @@
 """Turn plain English into a watch.
 
-A rule-based parser works offline with zero setup. If ANTHROPIC_API_KEY is set
-(and the `llm` extra is installed), Claude is used first for richer requests,
-falling back to the rules on any failure.
+Rules come first and need no AI: built-in platforms (BookMyShow, District, Amul) and generic
+URL watches. If an AI provider is configured (OpenAI, Gemini, Claude, Ollama...), it handles
+requests the rules can't understand, or everything when the user asks with /ai.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from nudge.models import Watch, format_duration, new_id, parse_duration
+
+if TYPE_CHECKING:
+    from nudge.llm import LLMConfig
 
 log = logging.getLogger(__name__)
 
@@ -137,107 +140,145 @@ def parse_rules(text: str, default_interval: str = "15m") -> dict[str, Any]:
     return spec
 
 
-# -- Claude-powered parser ----------------------------------------------------
+# -- AI-powered parser (optional, any provider) --------------------------------
 
-LLM_SYSTEM = """You convert a user's plain-English monitoring request into a watch spec for Nudge,
-a bot that polls a URL on a schedule and sends a Telegram alert when a condition becomes true.
+LLM_SYSTEM = """You convert a user's plain-English monitoring request into a JSON watch spec for Nudge,
+a bot that checks things on a schedule and sends a Telegram alert when a condition becomes true.
 
-Check types:
-- status: alert when the URL responds with HTTP 2xx/3xx ("goes live", "is up"). Set down=true to alert when it is unreachable instead.
-- keyword: alert when `text` appears in the page text (case-insensitive). Set absent=true to alert when it DISAPPEARS
-  (best for restocks/ticket drops: watch for "Sold out" / "Coming soon" to vanish). Optional `selector` scopes the search.
-- selector: alert when CSS `selector` matches at least one element (optionally containing `text`).
-- json: for JSON APIs. `path` is a dotted path (e.g. data.items.0.status), `op` one of
-  exists, missing, truthy, eq, ne, gt, gte, lt, lte, contains, len_gt; `value` the comparison value as a string.
-- change: alert whenever the page (or `selector` region) changes.
+Return ONLY a JSON object: {"check": ..., "url": ..., "name": ..., "params": {...},
+"interval": "15m" | null, "cron": null | "<5-field cron, UTC>", "notify_once": false}
 
-Rules: use the exact URL the user gave; if they gave none but named a well-known site, use its most specific
-public URL you are confident about. Prefer keyword with absent=true for "back in stock"/"tickets available" when
-the user mentions the current blocking text. interval is like 5m, 15m, 1h (default 15m unless asked; never below 1m).
-Use cron only if the user asked for specific times. name is a short human label (max 60 chars)."""
+Check types and their params:
+- "bookmyshow": movie bookings opening on BookMyShow. params {"movie": title, "city": city}. url may be "".
+- "district": movie bookings opening on District (district.in). params {"movie": title, "city": city,
+  optional "cinema": cinema name}. url may be "".
+- "amul": Amul shop products in stock. params {"pincode": 6 digits, "product": words in product name
+  (e.g. "whey", "chocolate whey", "milkshake"; "" for all), optional "category": "protein" (default)}.
+- "booking": any ticket/registration page; alerts when a Book/Buy/Register button is live. params {}.
+- "status": url responds HTTP 2xx/3xx. params {"down": true} to alert when it is unreachable instead.
+- "keyword": params {"text": phrase, "absent": true to alert when it DISAPPEARS (e.g. "Sold out"), optional "selector"}.
+- "selector": params {"selector": CSS selector, optional "text"}.
+- "json": JSON APIs. params {"path": "data.items.0.status", "op": exists|missing|truthy|eq|ne|gt|gte|lt|lte|contains,
+  "value": comparison value}.
+- "change": alert whenever the page changes. params {optional "selector"}.
+
+Rules: prefer bookmyshow/district/amul when the user names those platforms. Use the exact URL if one is given;
+never invent URLs for other sites — if no URL is given and no platform fits, return {"error": "<what is missing>"}.
+If a required param is missing (pincode, city, movie), return {"error": "<short question to the user>"}.
+Cities: use plain names like "bengaluru", "mumbai", "delhi", "hyderabad", "chennai", "pune", "kolkata".
+interval like "5m", "15m", "1h" (default "5m" for bookings and stock, "15m" otherwise; never below "1m").
+name: short human label, max 60 chars."""
+
+_URL_OPTIONAL = {"bookmyshow", "district", "amul"}
+_DEFAULT_URLS = {"bookmyshow": "https://in.bookmyshow.com/", "district": "https://www.district.in/movies/",
+                 "amul": "https://shop.amul.com/en/browse/protein"}
 
 
-def parse_llm(text: str, model: str, default_interval: str = "15m") -> dict[str, Any] | None:
+def parse_llm(text: str, cfg: "LLMConfig", default_interval: str = "15m") -> dict[str, Any]:
+    """Ask the configured model to parse the request. Raises ParseError/LLMError on failure."""
+    from nudge.checkers import REGISTRY
+    from nudge.llm import complete_json
+
+    data = complete_json(cfg, LLM_SYSTEM, text)
+    if data.get("error"):
+        raise ParseError(str(data["error"]))
+    check = str(data.get("check") or "")
+    if check not in REGISTRY:
+        raise ParseError(f"The AI suggested an unknown check type {check!r}")
+    url = str(data.get("url") or "")
+    if not URL_RE.match(url):
+        if check not in _URL_OPTIONAL:
+            raise ParseError("I need a URL for that. Send the link of the page to watch.")
+        url = _DEFAULT_URLS[check]
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    params = {k: v for k, v in params.items() if v not in (None, "")}
+    if check == "amul":
+        params["pincode"] = str(params.get("pincode", ""))
+    interval = data.get("interval")
     try:
-        import anthropic
-        from pydantic import BaseModel
-        from typing import Literal, Optional
-    except ImportError:
-        log.info("anthropic not installed; using rule-based parser (pip install 'nudge-bot[llm]')")
-        return None
-
-    class WatchSpec(BaseModel):
-        url: str
-        name: str
-        check: Literal["status", "keyword", "selector", "json", "change"]
-        text: Optional[str] = None
-        absent: bool = False
-        selector: Optional[str] = None
-        path: Optional[str] = None
-        op: Optional[str] = None
-        value: Optional[str] = None
-        down: bool = False
-        interval: Optional[str] = None
-        cron: Optional[str] = None
-        notify_once: bool = False
-
-    try:
-        client = anthropic.Anthropic()
-        response = client.beta.messages.parse(
-            model=model,
-            max_tokens=4000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            output_config={"effort": "low"},
-            system=LLM_SYSTEM,
-            messages=[{"role": "user", "content": text}],
-            output_format=WatchSpec,
-        )
-    except anthropic.APIError as exc:
-        log.warning("Claude parse failed (%s); falling back to rules", exc)
-        return None
-    if response.stop_reason == "refusal" or response.parsed_output is None:
-        return None
-    s = response.parsed_output
-    if not URL_RE.match(s.url):
-        return None
-
-    params: dict[str, Any] = {}
-    if s.check == "keyword":
-        params = {"text": s.text or ""}
-        if s.absent:
-            params["absent"] = True
-    elif s.check == "json":
-        params = {"path": s.path or "", "op": s.op or "exists"}
-        if s.value is not None:
-            params["value"] = s.value
-    elif s.check == "status" and s.down:
-        params = {"down": True}
-    if s.selector and s.check in ("keyword", "selector", "change"):
-        params["selector"] = s.selector
-    if s.check == "selector" and s.text:
-        params["text"] = s.text
-    interval = s.interval
-    try:
-        if interval:
-            interval = format_duration(max(60.0, parse_duration(interval)))
+        interval = format_duration(max(60.0, parse_duration(interval))) if interval else None
     except ValueError:
         interval = None
-    return {"url": s.url, "name": s.name[:80], "check": s.check, "params": params,
-            "interval": interval or (None if s.cron else default_interval), "cron": s.cron,
-            "notify_once": s.notify_once}
+    cron = data.get("cron") or None
+    return {"url": url, "check": check, "params": params, "name": str(data.get("name") or url)[:80],
+            "interval": interval or (None if cron else default_interval), "cron": cron,
+            "notify_once": bool(data.get("notify_once")), "confident": True}
 
 
-def parse(text: str, *, use_llm: bool = False, model: str = "claude-opus-5-5",
+_NEEDS_HELP = {
+    "pincode": "Which pincode should I check? Add your 6-digit pincode, e.g. “Amul whey protein at 560001”.",
+    "city": "Which city? e.g. “… in Bengaluru”.",
+    "movie": "Which movie? Put the title in quotes, e.g. “\"Jailer 2\" on District in Chennai”.",
+}
+
+
+def _platform_spec(text: str, default_interval: str) -> dict[str, Any] | None:
+    from nudge import platforms
+
+    spec = platforms.detect(text)
+    if not spec:
+        return None
+    explicit_interval, cron = _interval(text, "")
+    spec["interval"] = explicit_interval or (None if cron else ("5m" if spec["check"] != "booking" else "10m"))
+    spec["cron"] = cron
+    spec["notify_once"] = bool(re.search(r"\bonce\b", text, re.I))
+    spec["confident"] = not spec.get("needs")
+    return spec
+
+
+def parse(text: str, *, llm: "LLMConfig | None" = None, force_llm: bool = False,
           default_interval: str = "15m") -> Watch:
-    spec = parse_llm(text, model, default_interval) if use_llm else None
+    """Plain English -> Watch. Rules first (no AI needed); the configured LLM, if any, handles the rest.
+
+    force_llm=True (Telegram /ai) asks the model first.
+    """
+    from nudge.llm import LLMError
+
+    text = text.strip()
+    spec: dict[str, Any] | None = None
+    llm_error: str | None = None
+
+    def try_llm() -> dict[str, Any] | None:
+        nonlocal llm_error
+        if not llm:
+            return None
+        try:
+            return parse_llm(text, llm, default_interval)
+        except (LLMError, ParseError, ValueError) as exc:
+            llm_error = str(exc)
+            log.info("AI parse failed: %s", exc)
+            return None
+
+    if force_llm:
+        if not llm:
+            raise ParseError("No AI provider is configured. Set OPENAI_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY "
+                             "(or NUDGE_LLM_BASE_URL for Ollama), or just describe the watch without /ai.")
+        spec = try_llm()  # on failure, fall through to the rules, which may still understand it
     if spec is None:
-        spec = parse_rules(text, default_interval)
+        spec = _platform_spec(text, default_interval)
+    if spec is None:
+        try:
+            spec = parse_rules(text, default_interval)
+            lowered = text.lower()
+            spec["confident"] = spec["check"] != "status" or any(h in lowered for h in STATUS_HINTS + DOWN_HINTS)
+        except ParseError:
+            spec = try_llm() if not force_llm else None
+            if spec is None:
+                raise ParseError(llm_error or "I need a link to watch, or a platform I know (BookMyShow, District, "
+                                 "Amul). e.g. “tell me when \"Jailer 2\" bookings open on District in Bengaluru”.")
+    if not spec.get("confident") and not force_llm:
+        spec = try_llm() or spec
+    for need in spec.get("needs") or []:
+        if not spec["params"].get(need):
+            raise ParseError(_NEEDS_HELP.get(need, f"Missing {need}."))
     if spec["check"] == "keyword" and not spec["params"].get("text"):
         raise ParseError("What text should I look for? Put it in quotes, e.g. \"Book now\".")
+    interval = spec.get("interval") or (None if spec.get("cron") else default_interval)
+    if interval and parse_duration(interval) < 60:
+        interval = "1m"  # be kind to the sites being watched
     return Watch(id=new_id(), name=spec["name"], url=spec["url"], check=spec["check"], params=spec["params"],
-                 interval=spec.get("interval"), cron=spec.get("cron"), notify_once=spec.get("notify_once", False),
-                 description=text.strip())
+                 interval=interval,
+                 cron=spec.get("cron"), notify_once=spec.get("notify_once", False), description=text)
 
 
 def describe(watch: Watch) -> str:
@@ -255,6 +296,18 @@ def describe(watch: Watch) -> str:
         what = f"{p.get('path') or '$'} {p.get('op', 'exists')} {p.get('value', '')}".strip()
     elif watch.check == "change":
         what = "content changes" + (f" in {p['selector']}" if p.get("selector") else "")
+    elif watch.check in ("district", "bookmyshow"):
+        platform = "District" if watch.check == "district" else "BookMyShow"
+        if p.get("movie"):
+            what = f"\"{p['movie']}\" bookings open on {platform} in {str(p.get('city', '')).title()}"
+        else:
+            what = f"bookings open on this {platform} page"
+        if p.get("cinema"):
+            what += f" at {p['cinema']}"
+    elif watch.check == "amul":
+        what = f"Amul {p.get('product') or p.get('category') or 'protein'} is in stock at {p.get('pincode')}"
+    elif watch.check == "booking":
+        what = "a Book/Buy button goes live"
     else:
         what = f"{watch.check} {p}"
     return f"when {what} ({watch.schedule}{', once' if watch.notify_once else ''})"

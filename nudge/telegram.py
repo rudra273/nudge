@@ -16,13 +16,15 @@ class TelegramError(RuntimeError):
 
 
 class Telegram:
-    def __init__(self, token: str, chat_ids: list[str], session: requests.Session | None = None):
+    def __init__(self, token: str, chat_ids: list[str], session: requests.Session | None = None,
+                 api_base: str = "https://api.telegram.org"):
         self.token = token
+        self.api_base = api_base.rstrip("/")
         self.chat_ids = [str(c) for c in chat_ids]
         self.session = session or requests.Session()
 
     def _call(self, method: str, http_timeout: float = 30, **payload: Any) -> Any:
-        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        url = f"{self.api_base}/bot{self.token}/{method}"
         r = self.session.post(url, json=payload, timeout=http_timeout)
         data = r.json()
         if not data.get("ok"):
@@ -41,6 +43,16 @@ class Telegram:
     def get_updates(self, offset: int, timeout: int = 0) -> list[dict]:
         return self._call("getUpdates", http_timeout=timeout + 15, offset=offset, timeout=timeout,
                           allowed_updates=["message"])
+
+    def get_me(self) -> dict:
+        return self._call("getMe")
+
+    def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Register the command menu shown in Telegram's UI."""
+        try:
+            self._call("setMyCommands", commands=[{"command": c, "description": d} for c, d in commands])
+        except (requests.RequestException, TelegramError) as exc:
+            log.warning("setMyCommands failed: %s", exc)
 
     def is_allowed(self, chat_id: Any) -> bool:
         return str(chat_id) in self.chat_ids

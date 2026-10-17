@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from nudge import __version__, nlp
-from nudge.bot import process_updates
+from nudge.bot import COMMANDS, process_updates
 from nudge.checkers import REGISTRY, load_plugins
 from nudge.config import Settings
 from nudge.engine import next_run, run_due, run_watch
@@ -33,7 +33,8 @@ class App:
     def __init__(self, settings: Settings):
         self.settings = settings
         load_plugins(settings.plugins)
-        self.tg = Telegram(settings.telegram_token, settings.telegram_chat_ids) if settings.telegram_enabled else None
+        self.tg = (Telegram(settings.telegram_token, settings.telegram_chat_ids, api_base=settings.telegram_api_base)
+                   if settings.telegram_enabled else None)
 
     def store(self) -> Store:
         return Store.load(self.settings.watches_path, self.settings.state_path)
@@ -46,7 +47,8 @@ class App:
 
     @property
     def check_kwargs(self) -> dict[str, Any]:
-        return {"timeout": self.settings.timeout, "user_agent": self.settings.user_agent}
+        return {"timeout": self.settings.timeout, "user_agent": self.settings.user_agent,
+                "browser": self.settings.browser}
 
 
 def _parse_param(raw: str) -> tuple[str, Any]:
@@ -69,7 +71,7 @@ def cmd_add(app: App, args: argparse.Namespace) -> int:
             print("Describe what to watch, or use --url/--check/--param.", file=sys.stderr)
             return 2
         try:
-            watch = nlp.parse(text, use_llm=app.settings.llm_enabled and not args.no_llm, model=app.settings.llm_model,
+            watch = nlp.parse(text, llm=None if args.no_llm else app.settings.llm, force_llm=args.ai,
                               default_interval=app.settings.default_interval)
         except nlp.ParseError as exc:
             print(exc, file=sys.stderr)
@@ -184,8 +186,13 @@ def cmd_run(app: App, args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    log.info("Nudge %s running: %s, tick %ss, telegram %s, llm %s", __version__, app.settings.watches_path,
-             app.settings.tick_seconds, "on" if app.tg else "off", "on" if app.settings.llm_enabled else "off")
+    log.info("Nudge %s running: %s, tick %ss, telegram %s, AI %s", __version__, app.settings.watches_path,
+             app.settings.tick_seconds, "on" if app.tg else "off",
+             app.settings.llm.label if app.settings.llm else "off (rules only)")
+    if app.tg:
+        app.tg.set_commands(COMMANDS)
+    if app.tg and not app.tg.chat_ids:
+        log.warning("TELEGRAM_CHAT_ID is not set: message your bot and it will reply with your chat id")
     while not stop:
         started = time.time()
         try:
@@ -202,6 +209,78 @@ def cmd_run(app: App, args: argparse.Namespace) -> int:
             time.sleep(0.5)
     log.info("Nudge stopped")
     return 0
+
+
+def cmd_doctor(app: App, args: argparse.Namespace) -> int:
+    """Check every moving part, so you can test end to end with confidence."""
+    from nudge.checkers import CheckContext
+    from nudge.checkers.base import BlockedError
+    from nudge.llm import LLMError, complete_json
+    from nudge.platforms.amul import AmulClient
+
+    problems = 0
+
+    def report(ok: bool | None, label: str, detail: str = "") -> None:
+        nonlocal problems
+        mark = "✓" if ok else ("·" if ok is None else "✗")
+        problems += ok is False
+        print(f"  {mark} {label}" + (f": {detail}" if detail else ""))
+
+    s = app.settings
+    print("Telegram")
+    if not app.tg:
+        report(False, "TELEGRAM_BOT_TOKEN not set", "create a bot with @BotFather")
+    else:
+        try:
+            me = app.tg.get_me()
+            report(True, "bot token works", "@" + me.get("username", "?"))
+        except Exception as exc:
+            report(False, "bot token rejected", str(exc))
+        if app.tg.chat_ids:
+            report(True, "allowed chats", ", ".join(app.tg.chat_ids))
+            if args.send:
+                app.tg.send("🩺 <b>Nudge doctor</b>: Telegram works.")
+                report(True, "test message sent")
+        else:
+            report(False, "TELEGRAM_CHAT_ID not set", "run `nudge run` and message your bot: it replies with your id")
+
+    print("AI (optional)")
+    if s.llm_error:
+        report(False, "config error", s.llm_error)
+    elif not s.llm:
+        report(None, "off", "built-in rules only; set OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY to enable")
+    else:
+        try:
+            complete_json(s.llm, 'Reply with the JSON object {"ok": true}.', "ping")
+            report(True, s.llm.label)
+        except LLMError as exc:
+            report(False, s.llm.label, str(exc)[:200])
+
+    print("Sites (from this machine)")
+    ctx = CheckContext(previous={}, timeout=s.timeout, user_agent=s.user_agent, browser=s.browser)
+    try:
+        client = AmulClient(ctx.session(), timeout=s.timeout)
+        region = client.set_pincode(args.pincode)
+        items = client.products("protein")
+        report(True, "Amul shop", f"pincode {args.pincode} → {region}, {sum(int(x.get('available') or 0) > 0 for x in items)}"
+               f"/{len(items)} protein products in stock")
+    except Exception as exc:
+        report(False, "Amul shop", str(exc))
+    for label, url in (("District", "https://www.district.in/movies/"),
+                       ("BookMyShow", "https://in.bookmyshow.com/explore/movies-bengaluru")):
+        try:
+            resp = ctx.get(url)
+            report(True, label, f"HTTP {resp.status}")
+        except BlockedError as exc:
+            report(False, label, str(exc))
+        except Exception as exc:
+            report(False, label, f"{type(exc).__name__}: {exc}")
+
+    store = app.store()
+    print("Watches")
+    report(True, str(s.watches_path), f"{len(store.watches)} watches ({sum(w.enabled for w in store.watches)} active)")
+    print("\nAll good!" if not problems else f"\n{problems} problem(s) found.")
+    return 1 if problems else 0
 
 
 def cmd_test(app: App, args: argparse.Namespace) -> int:
@@ -228,7 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--every", help="interval, e.g. 5m, 1h")
     a.add_argument("--cron", help='cron expression (UTC), e.g. "*/10 9-18 * * *"')
     a.add_argument("--once", action="store_true", help="pause after the first notification")
-    a.add_argument("--no-llm", action="store_true", help="use the offline rule-based parser")
+    a.add_argument("--no-llm", action="store_true", help="never use AI, only the built-in rules")
+    a.add_argument("--ai", action="store_true", help="ask the configured AI first")
     a.add_argument("--dry-run", action="store_true", help="show the parsed watch without saving")
     a.set_defaults(fn=cmd_add)
 
@@ -253,6 +333,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--grace", default="0s", help="treat checks due within this window as due (useful for cron/CI)")
     r.set_defaults(fn=cmd_run)
 
+    d = sub.add_parser("doctor", help="check Telegram, AI and site access")
+    d.add_argument("--send", action="store_true", help="also send a Telegram test message")
+    d.add_argument("--pincode", default="560001", help="pincode for the Amul check")
+    d.set_defaults(fn=cmd_doctor)
+
     t = sub.add_parser("test", help="send a test Telegram notification")
     t.set_defaults(fn=cmd_test)
     return p
@@ -262,8 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    for noisy in ("httpx", "httpx2", "anthropic"):
+    for noisy in ("urllib3", "playwright"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         return args.fn(App(Settings.from_env()), args)
