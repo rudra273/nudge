@@ -1,28 +1,57 @@
-# Copy to ./watches.yaml (or set NUDGE_WATCHES) and edit. Every field except url is optional.
-# Nudge alerts when a condition flips from false to true, so you get one nudge per event, not one per check.
+# Copy to ./watches.yaml (or set NUDGE_WATCHES) and edit — or just message your bot.
+# Every field except url/check is optional. Nudge alerts when a condition becomes true,
+# so you get one nudge per event, not one per check.
 watches:
-  # Ticket drop: alert when "Sold out" disappears from the booking area.
-  - id: dune70
-    name: Dune IMAX tickets
-    url: https://tickets.example.com/movies/dune-part-three
+  # Movie bookings on District, by title + city (no URL needed).
+  - id: jailr2
+    name: Jailer 2 on District
+    url: https://www.district.in/movies/
+    check: district
+    params:
+      movie: Jailer 2
+      city: bengaluru
+      cinema: PVR Orion        # optional: only when this cinema has shows
+    interval: 5m
+    notify_once: true
+
+  # Movie bookings on BookMyShow (works best from a home connection; see README).
+  - id: dune3
+    name: Dune Part Three on BookMyShow
+    url: https://in.bookmyshow.com/
+    check: bookmyshow
+    params:
+      movie: Dune Part Three
+      city: mumbai
+    interval: 5m
+
+  # Amul protein restock for your pincode (alerts for each product that comes back).
+  - id: whey
+    name: Amul whey protein
+    url: https://shop.amul.com/en/browse/protein
+    check: amul
+    params:
+      pincode: "560001"
+      product: whey           # words that must all be in the product name; empty = all protein products
+    interval: 5m
+
+  # Any ticket page: alert when a "Book tickets" / "Buy now" / "Register now" button goes live.
+  - id: fest
+    name: College fest passes
+    url: https://www.district.in/events/some-event-buy-tickets
+    check: booking
+    interval: 10m
+
+  # Generic page: alert when "Sold out" disappears.
+  - id: ps6
+    name: Console restock
+    url: https://shop.example.com/products/console
     check: keyword
     params:
       text: Sold out
       absent: true
-      selector: "#booking"
-    interval: 5m
-    notify_once: true
-
-  # Product restock: alert when the add-to-cart button exists.
-  - id: ps6
-    name: Console restock
-    url: https://shop.example.com/products/console
-    check: selector
-    params:
-      selector: "button.add-to-cart:not([disabled])"
     interval: 10m
 
-  # Registration opens, via a JSON API.
+  # JSON API: registration opens.
   - id: marath
     name: City marathon registration
     url: https://api.example.com/v1/events/marathon
@@ -32,7 +61,7 @@ watches:
       op: truthy
     cron: "*/15 6-23 * * *"   # UTC
 
-  # New release on GitHub.
+  # New GitHub release.
   - id: relnot
     name: New release of my favourite tool
     url: https://api.github.com/repos/OWNER/REPO/releases/latest
@@ -40,10 +69,3 @@ watches:
     params:
       path: tag_name
     interval: 1h
-
-  # Site goes live.
-  - id: launch
-    name: Conference site live
-    url: https://conf.example.com
-    check: status
-    interval: 30m

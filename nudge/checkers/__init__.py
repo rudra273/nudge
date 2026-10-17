@@ -35,7 +35,8 @@ def load_plugins(modules: list[str]) -> None:
         importlib.import_module(module)
 
 
-# Built-in checkers register themselves on import.
+# Built-in and platform checkers register themselves on import.
 from nudge.checkers import builtin  # noqa: E402,F401
+from nudge import platforms  # noqa: E402,F401
 
 __all__ = ["CheckContext", "CheckResult", "Response", "checker", "get_checker", "load_plugins", "REGISTRY"]

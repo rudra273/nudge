@@ -2,13 +2,17 @@
 #
 # Setup (in your own fork / private copy of this repo):
 #   1. Settings → Secrets and variables → Actions → Secrets:
-#        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (optional: ANTHROPIC_API_KEY)
+#        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#        optional AI (any one): OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY
 #   2. Settings → Secrets and variables → Actions → Variables:
 #        NUDGE_ENABLED = true
 #   3. Commit a watches.yaml (see examples/watches.yaml) or add watches by messaging your bot.
 #
 # Each run handles pending Telegram commands, runs due checks, keeps runtime state in the
 # Actions cache, and commits watches.yaml back only when watches were added/changed.
+#
+# Note: BookMyShow usually blocks GitHub's datacenter IPs. Amul, District and most sites work fine;
+# for BookMyShow, run Nudge on a home machine / Raspberry Pi instead.
 name: nudge
 
 on:
@@ -37,7 +41,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install ".[llm]"
+        run: pip install .
 
       - name: Restore state
         uses: actions/cache/restore@v4
@@ -51,7 +55,75 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NUDGE_LLM_PROVIDER: ${{ vars.NUDGE_LLM_PROVIDER }}
+          NUDGE_LLM_MODEL: ${{ vars.NUDGE_LLM_MODEL }}
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .nudge-state.json
+          key: nudge-state-${{ github.run_id }}
+
+      - name: Commit watch changes
+        run: |
+          if [ -n "$(git status --porcelain watches.yaml)" ]; then
+            git config user.name "nudge-bot"
+            git config user.email "nudge-bot@users.noreply.github.com"
+            git add watches.yaml
+            git commit -m "nudge: update watches"
+            git push
+          fi
+name: nudge
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # GitHub may delay scheduled runs; 10 min is a practical floor
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nudge
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: vars.NUDGE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install .
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: .nudge-state.json
+          key: nudge-state-${{ github.run_id }}
+          restore-keys: nudge-state-
+
+      - name: Run checks
+        run: nudge run --once --grace 5m
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NUDGE_LLM_PROVIDER: ${{ vars.NUDGE_LLM_PROVIDER }}
+          NUDGE_LLM_MODEL: ${{ vars.NUDGE_LLM_MODEL }}
 
       - name: Save state
         if: always()

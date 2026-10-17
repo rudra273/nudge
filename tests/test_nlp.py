@@ -4,7 +4,7 @@ from nudge import nlp
 
 
 def p(text):
-    return nlp.parse(text, use_llm=False)
+    return nlp.parse(text)
 
 
 def test_keyword_quoted_with_interval():
@@ -63,3 +63,7 @@ def test_no_url():
 def test_describe():
     w = p('when https://x.com no longer says "Sold out" once')
     assert nlp.describe(w) == 'when "Sold out" disappears (every 15m, once)'
+
+
+def test_interval_has_a_floor():
+    assert p('https://x.com says "hi" every 10 seconds').interval == "1m"

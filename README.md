@@ -4,132 +4,160 @@
 
 Tell Nudge what to watch. Nudge tells you when it happens.
 
-Nudge is a small, self-hostable bot that checks websites, APIs and services on a schedule and sends you a
-Telegram message when something you care about happens: tickets go on sale, a product is back in stock,
-registration opens, a new release ships, a site comes online.
+Nudge is a small, self-hostable Telegram bot that watches booking platforms, shops, websites and APIs,
+and messages you the moment something you care about goes live: movie bookings open, Amul protein is
+back in stock, a concert's "Book tickets" button appears, registration opens.
 
 ```
-you  → tell me when https://tickets.example.com/dune no longer says "Sold out" every 5 min
-nudge → 👀 Watching tickets.example.com without "Sold out" (a1b2c3)
-        when "Sold out" disappears (every 5m)
-...
-nudge → 🔔 tickets.example.com without "Sold out"
-        "Sold out" is gone from the page
-        🔗 https://tickets.example.com/dune
+you   → "Jailer 2" on District at PVR Orion in Bangalore
+nudge → 👀 Watching Jailer 2 on District (bengaluru)
+        when "Jailer 2" bookings open on District in Bengaluru at PVR Orion (every 5m)
+        Now: No shows at PVR Orion yet
+  …
+nudge → 🔔 Jailer 2 on District (bengaluru)
+        Book Jailer 2 Tickets in Bengaluru: bookings open at PVR Orion! Shows: 03:30 PM, 06:55 PM, 09:45 PM
+        🔗 https://www.district.in/movies/jailer-2-movie-tickets-in-bengaluru-MV187766
 ```
 
-- **Plain English.** Describe the watch in a sentence, from Telegram or the CLI. Works offline with a
-  rule-based parser; set `ANTHROPIC_API_KEY` and Claude handles fuzzier requests.
-- **One nudge per event.** You get an alert when a condition goes from false to true, not on every check.
-- **Manage from Telegram.** `/list`, `/pause`, `/resume`, `/remove`, `/check`.
-- **Extensible.** Five built-in checkers, and you can add your own in a few lines of Python.
-- **Runs anywhere.** GitHub Actions (free, no server), a VPS, Docker, or any box with Python 3.10+.
-- **Minimal.** Four small dependencies, two files of state, no database, no dashboard.
+- **No AI required.** The core works with built-in rules. BookMyShow, District and Amul are supported out of
+  the box, and any URL works with simple conditions.
+- **Any AI, if you want it.** Add an OpenAI, Gemini or Claude key, or point it at Ollama, OpenRouter, Groq or any
+  OpenAI-compatible server, and it handles fuzzier requests.
+- **Telegram is the UI.** Add, list, check, pause, resume, remove and re-schedule watches by chatting. There's no
+  dashboard to host.
+- **One nudge per event.** You get an alert when something becomes true, not on every check.
+- **Runs anywhere.** A home PC or Raspberry Pi, a VPS, Docker, or GitHub Actions. Python 3.10+, four small
+  dependencies, state kept in two files.
+
+## Built-in platforms (no AI, no URL needed)
+
+| Platform | Say | How it checks |
+|---|---|---|
+| **District** (district.in) | `"Jailer 2" on District in Bengaluru`<br>`Jailer 2 on district at PVR Orion in Bangalore` | Finds the movie's city page and alerts when showtimes appear, optionally at one cinema |
+| **BookMyShow** | `Dune Part Three on BookMyShow in Mumbai` | Alerts when the movie shows up in the city's now-booking list. With a movie URL, alerts when the Book button or ticket link appears |
+| **Amul shop** | `Amul whey protein in stock at 560001`<br>`amul protein at 400001` | Uses the shop's own stock API for your pincode. Alerts for each matching product that comes back in stock |
+| **Any ticket page** | paste the link (District events, Insider, college fests…) | Alerts when a "Book tickets", "Buy now" or "Register now" button goes live |
+
+Cities are understood by common names: Bangalore, Bengaluru, Bombay, Gurgaon (counts as Delhi NCR), Madras and so on.
+
+> **About BookMyShow:** it uses Cloudflare and blocks many datacenter IPs, including cloud servers and GitHub
+> Actions. From a home connection it usually works. If it's blocked, Nudge tells you so (it never sends a false
+> alert), and browser mode (below) can help. District and Amul worked fine even from a cloud server.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/rudra273/nudge && cd nudge
-pip install .                 # or: pip install ".[llm]" for Claude-powered parsing
-cp .env.example .env          # add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
-
-nudge test                    # sends a test message to Telegram
-nudge add 'tell me when https://example.com/tickets says "Book now" every 5 minutes'
-nudge list
-nudge run                     # scheduler + Telegram bot, Ctrl-C to stop
+python3 -m venv .venv && source .venv/bin/activate
+pip install .
+cp .env.example .env            # paste TELEGRAM_BOT_TOKEN (from @BotFather)
+nudge run                       # message your bot: it replies with your chat id
+                                # put that in TELEGRAM_CHAT_ID, restart `nudge run`
 ```
 
-Without Telegram configured, alerts go to stdout, which is handy for trying things out.
+Then just chat with your bot.
 
-### Getting Telegram credentials
+## End-to-end testing checklist
 
-1. Message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token into `TELEGRAM_BOT_TOKEN`.
-2. Send your new bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy
-   `message.chat.id` into `TELEGRAM_CHAT_ID`. (If Nudge is already running, message it and it will reply
-   with your chat id.)
+1. **Health check:** `nudge doctor --send` checks your bot token, chat id, AI provider (if any), and whether this
+   machine can reach Amul, District and BookMyShow. It also sends you a test message.
+2. **Start the bot:** `nudge run` (leave it running).
+3. **In Telegram, send:**
+   - `/start`: shows examples and commands.
+   - `Amul whey protein in stock at <your pincode>`: replies with current stock. If something is already in
+     stock, you get the alert straight away.
+   - `"<a movie that's running now>" on District in <your city>`: should reply "It's already happening" with
+     showtimes and a link.
+   - `"<an upcoming movie>" on District in <your city>`: should reply "No showtimes yet (Releasing …)".
+   - `<movie> on BookMyShow in <city>`: either works, or reports that it's blocked from your network.
+   - `/list`, `/check <id>`, `/every <id> 2m`, `/pause <id>`, `/resume <id>`, `/remove <id>`, `/status`.
+4. **Wait for a real alert:** for example, keep an Amul product you want watched and leave `nudge run` going.
+5. **From the terminal:** `nudge list` shows the same watches, and `nudge check` runs everything once now.
 
-Only chats listed in `TELEGRAM_CHAT_ID` (comma-separated) can control the bot and receive alerts.
+## Telegram commands
 
-## Telling Nudge what to watch
+| Command | |
+|---|---|
+| any text, or `/watch <request>` | add a watch, which runs its first check immediately |
+| `/list` | your watches, with status |
+| `/check <id>` | run a check now |
+| `/pause <id>` · `/resume <id>` · `/remove <id>` | manage a watch (`/resume` re-arms the alert) |
+| `/every <id> <interval>` | change how often it checks, e.g. `/every a1b2 2m` |
+| `/ai <request>` | have the configured AI parse the request |
+| `/status` | health: active watches, AI provider, browser mode |
+| `/help` | examples |
 
-Send the bot a message, or run `nudge add "<request>"`. Add `--dry-run` to see what was understood
-without saving it.
+`<id>` can also be a unique id prefix or the watch's exact name. Only chats listed in `TELEGRAM_CHAT_ID` can use the
+bot. Anyone else is told the instance is private, and shown their chat id.
+
+The same actions exist on the CLI: `nudge add "<request>"`, `nudge list`, `nudge check [id]`, `nudge pause|resume|remove <id>`.
+
+## Watching any website or API (no AI)
 
 | You say | Nudge watches for |
 |---|---|
-| `tell me when https://site/tickets says "Book now"` | the text appearing (`keyword`) |
+| `https://site/tickets says "Book now"` | the text appearing (`keyword`) |
 | `https://shop/item no longer says "Sold out", every 5 min` | the text disappearing (`keyword`, `absent`) |
-| `ping me when https://site/concerts mentions Coldplay` | an unquoted word or phrase (`keyword`) |
-| `tell me when https://new-site.example.com goes live` | an HTTP 2xx/3xx response (`status`) |
-| `alert me if https://api.example.com is down every 2 min` | the site being unreachable (`status`, `down`) |
-| ``tell me when https://shop/item has `button.buy` `` | a CSS selector matching something (`selector`) |
+| `https://site/concerts mentions Coldplay` | an unquoted word or phrase |
+| `https://new-site.example.com goes live` | an HTTP 2xx/3xx response (`status`) |
+| `https://api.example.com is down every 2 min` | the site being unreachable (`status`, `down`) |
+| ``https://shop/item has `button.buy` `` | a CSS selector matching (`selector`) |
 | `https://api/slots field data.available > 0` | a JSON value meeting a condition (`json`) |
-| ``watch https://blog `article h2` for changes daily`` | content changing (`change`) |
+| ``https://blog `article h2` changes daily`` | content changing (`change`) |
 
-Things the rule-based parser understands:
+- **Schedule:** `every 5 minutes`, `every 2h`, `hourly`, `daily`, `cron "0 9 * * 1-5"` (UTC). Platform watches
+  default to 5 minutes; other watches default to 15.
+- **Once:** add `once` to pause the watch after the first alert.
 
-- **Schedule:** `every 5 minutes`, `every 2h`, `hourly`, `daily`, `cron "0 9 * * 1-5"` (UTC). The default is `15m`.
-- **Once:** add `once` to pause the watch after the first nudge.
-- **Text:** put it in quotes. Phrases like `no longer`, `disappears` or `is gone` mean "alert when it's gone".
-- **CSS selectors:** put them in `backticks`.
-- **JSON:** `field <path> <op> <value>`, where op is one of `is`, `=`, `!=`, `>`, `<`, `>=`, `<=`, `contains`,
-  `exists`, `is missing`, `is true`.
+## AI (optional, any provider)
 
-With `ANTHROPIC_API_KEY` set (and `pip install ".[llm]"`), requests go to Claude first, so looser wording
-like *"let me know when the Coldplay Mumbai tickets page stops saying coming soon"* works too. If the Claude
-call fails, Nudge falls back to the rules. Set `NUDGE_LLM=off` to turn this off, or `NUDGE_LLM_MODEL` to pick a
-different model. Nudge never sends page contents to the model, only your request.
+Nudge never needs AI. If you configure one, it is used only when the built-in rules can't understand a request,
+or when you ask for it with `/ai`. It only sees your sentence, never page contents.
 
-**Tip for restocks and ticket drops:** watching for the blocking text to *disappear* ("Sold out",
-"Coming soon", "Notify me") is usually more reliable than guessing what the page will say once it's live.
-
-## Managing watches
-
-| Telegram | CLI | |
+| Provider | Set | Default model |
 |---|---|---|
-| any text, or `/watch <request>` | `nudge add "<request>"` | add a watch |
-| `/list` | `nudge list` | show watches, their status and last result |
-| `/check <id>` | `nudge check [id…]` | run checks now |
-| `/pause <id>` | `nudge pause <id…>` | stop checking |
-| `/resume <id>` | `nudge resume <id…>` | start again (and re-arm the alert) |
-| `/remove <id>` | `nudge remove <id…>` | delete |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4.1-mini` |
+| Google Gemini | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `gemini-2.5-flash` |
+| Anthropic Claude | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` |
+| Ollama (local, free) | `NUDGE_LLM_PROVIDER=ollama`, `NUDGE_LLM_MODEL=llama3.1` | — |
+| OpenRouter, Groq, Together, LM Studio, vLLM… | `NUDGE_LLM_BASE_URL=<openai-compatible url>`, `NUDGE_LLM_API_KEY`, `NUDGE_LLM_MODEL` | — |
 
-An `<id>` can also be a unique id prefix or the watch's exact name.
+Override the model with `NUDGE_LLM_MODEL`, pick a provider explicitly with `NUDGE_LLM_PROVIDER`, or turn AI off
+with `NUDGE_LLM=off`. All providers are called over plain HTTPS, so no SDKs are needed.
 
-You can also edit `watches.yaml` directly; see [`examples/watches.yaml`](examples/watches.yaml). For full control
-from the CLI, use flags instead of a sentence:
+## Browser mode
+
+Some sites only work in a real browser. Enable headless Chromium with:
 
 ```bash
-nudge add --url https://api.example.com/v1/event --check json \
-  --param path=data.registration.open --param op=truthy --every 10m --name "Marathon registration"
+pip install ".[browser]" && playwright install chromium
+NUDGE_BROWSER=1 nudge run          # or per watch: params: {browser: true}
 ```
 
-## Checkers
+To use a Chrome or Chromium that's already installed instead of Playwright's download, set
+`NUDGE_BROWSER_PATH=/usr/bin/chromium`. Browser mode doesn't change your IP address, so a network that's blocked
+stays blocked.
+
+## Checkers (for watches.yaml)
 
 | `check` | Matches when | `params` |
 |---|---|---|
-| `status` | the URL returns 2xx/3xx | `down: true` to invert (also matches when unreachable), `status: [200, 204]` |
-| `keyword` | the text or regex is in the visible page text | `text` or `regex`, `absent`, `selector`, `case_sensitive` |
-| `selector` | a CSS selector matches at least `min_count` elements | `selector`, `min_count` (1), `text` |
-| `json` | a value in a JSON response satisfies `op`/`value` | `path` (e.g. `data.items[0].status`), `op`, `value` |
-| `change` | the content differs from the last check | `selector` or `path` (JSON) to scope it, `ignore` (regex) |
+| `district` | the movie has showtimes on District | `movie`, `city`, `cinema` (or a District movie URL) |
+| `bookmyshow` | the movie is booking on BookMyShow | `movie`, `city` (or a BookMyShow movie/event URL) |
+| `amul` | a matching product is in stock (one alert per newly stocked product) | `pincode`, `product`, `category` (`protein`) |
+| `booking` | a Book/Buy/Register button is live | `open_text`, `closed_text`, `showtimes: true` |
+| `status` | the URL returns 2xx/3xx | `down: true`, `status: [200]` |
+| `keyword` | the text or regex is on the page | `text` or `regex`, `absent`, `selector`, `case_sensitive` |
+| `selector` | a CSS selector matches | `selector`, `min_count`, `text` |
+| `json` | a JSON value satisfies `op`/`value` | `path`, `op`, `value` |
+| `change` | the content changes | `selector` or `path`, `ignore` |
 
-`op` is one of `exists`, `missing`, `truthy`, `falsy`, `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`,
-`len_gt`, `len_gte`, `len_lt`, `len_lte`, `len_eq`.
+Every checker also accepts `method`, `headers`, `body` and `browser`. See [`examples/watches.yaml`](examples/watches.yaml).
 
-Every checker also accepts `method`, `headers` and `body` in `params`, for APIs that need a POST or an auth header.
-
-### Notification rules
-
-- Nudge alerts when a watch goes from *not matched* to *matched*. If it stays matched, it stays quiet. If it
-  stops matching and later matches again, you get another alert.
-- `change` watches alert on every change. The first check only records a baseline.
-- `notify_once: true` pauses the watch after the first alert. `/resume` re-arms it.
-- After 3 failed checks in a row (timeouts, blocked requests, bad JSON), you get one warning.
+**Safety:** if a site returns an error or a bot-protection page, the check fails with a clear error. It never
+counts as "Sold out is gone". After 3 failures in a row you get one warning.
 
 ### Custom checkers
-
-A checker is a function that takes `(watch, ctx)` and returns a `CheckResult`:
 
 ```python
 # my_checkers.py
@@ -141,38 +169,14 @@ def price_below(watch, ctx):
     return CheckResult(price <= watch.params["max"], f"Price is {price}")
 ```
 
-Load it with `NUDGE_PLUGINS=my_checkers` (the module has to be importable) and use `check: price_below`. A
-fuller example is in [`examples/my_checkers.py`](examples/my_checkers.py). `ctx.fetch(watch)` returns a response
-with `.status`, `.text`, `.json()` and a parsed `.soup` (BeautifulSoup). A checker doesn't have to use HTTP at all.
+Load it with `NUDGE_PLUGINS=my_checkers`. A fuller example is in [`examples/my_checkers.py`](examples/my_checkers.py).
 
-## Deploying
+## Running it 24/7
 
-### GitHub Actions (free, no server)
-
-The included workflow [`.github/workflows/nudge.yml`](.github/workflows/nudge.yml) runs every 10 minutes.
-
-1. Fork this repo (make it **private** if your watch URLs are personal).
-2. Add repository **secrets** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (and optionally `ANTHROPIC_API_KEY`).
-3. Add a repository **variable** `NUDGE_ENABLED` = `true`.
-4. Commit a `watches.yaml`, or just message your bot. Each run handles pending Telegram commands, runs any
-   checks that are due, and commits `watches.yaml` back if you changed it.
-
-Bot replies arrive on the next run, so expect a delay of up to about 10 minutes, and GitHub can delay scheduled runs
-further when it's busy. GitHub also disables scheduled workflows in public repos after 60 days without
-activity. Runtime state is kept in the Actions cache.
-
-### VPS (systemd)
-
-```bash
-sudo useradd -m nudge && sudo -iu nudge
-git clone https://github.com/rudra273/nudge && cd nudge
-python3 -m venv .venv && .venv/bin/pip install ".[llm]"
-cp .env.example .env && nano .env
-```
-
-`/etc/systemd/system/nudge.service`:
+**Home PC, Raspberry Pi or VPS (recommended; BookMyShow works best from home):**
 
 ```ini
+# /etc/systemd/system/nudge.service
 [Unit]
 Description=Nudge notification bot
 After=network-online.target
@@ -191,72 +195,56 @@ WantedBy=multi-user.target
 sudo systemctl enable --now nudge && journalctl -u nudge -f
 ```
 
-In this mode the bot replies instantly, because it long-polls Telegram between checks.
-
-### Docker
+**Docker:**
 
 ```bash
-cp .env.example .env    # fill it in
-docker compose up -d    # watches and state live in ./data
-docker compose exec nudge nudge add 'tell me when https://example.com says "Open"'
+cp .env.example .env && docker compose up -d        # watches and state live in ./data
+# with browser mode:  docker compose build --build-arg WITH_BROWSER=true
 ```
 
-### Plain cron, or any scheduler
+**GitHub Actions (free, no server):** see the setup notes at the top of
+[`.github/workflows/nudge.yml`](.github/workflows/nudge.yml). Add the secrets, set the repo variable
+`NUDGE_ENABLED=true`, and you're done. Bot replies arrive on the next run (every ~10 minutes), and BookMyShow is
+usually blocked there.
 
-If you'd rather not run a daemon, `nudge run --once` does a single pass: it handles bot messages, runs the checks
-that are due, and exits. `--grace` counts checks that are due within that window as due, so a slightly early cron
-run doesn't skip them.
-
-```cron
-*/5 * * * * cd /home/me/nudge && .venv/bin/nudge run --once --grace 1m
-```
-
-This works the same way on Cloud Run jobs, Fly.io machines, Kubernetes CronJobs and similar. Just keep
-`NUDGE_WATCHES` and `NUDGE_STATE` on persistent storage.
+**Cron or any scheduler:** `nudge run --once --grace 1m` does one pass: it handles bot messages, runs the checks
+that are due, and exits.
 
 ## Configuration
 
-All settings come from environment variables, or from a `.env` file in the working directory.
+All settings come from environment variables or `.env`. See [`.env.example`](.env.example) for the full list.
+The main ones are `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, the AI variables above, `NUDGE_BROWSER`,
+`NUDGE_WATCHES`, `NUDGE_STATE`, `NUDGE_TICK`, `NUDGE_DEFAULT_INTERVAL` and `NUDGE_TIMEOUT`.
 
-| Variable | Default | |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | | bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | | allowed chat ids, comma-separated |
-| `ANTHROPIC_API_KEY` | | turns on Claude-powered parsing |
-| `NUDGE_LLM` | `auto` | `auto` (on when a key is set), `on`, `off` |
-| `NUDGE_LLM_MODEL` | `claude-opus-5-5` | model used for parsing |
-| `NUDGE_WATCHES` | `watches.yaml` | watch definitions |
-| `NUDGE_STATE` | `.nudge-state.json` | runtime state (last results, Telegram offset) |
-| `NUDGE_TICK` | `30` | seconds between scheduler ticks in `nudge run` |
-| `NUDGE_DEFAULT_INTERVAL` | `15m` | interval for watches that don't set one |
-| `NUDGE_TIMEOUT` | `20` | HTTP timeout, in seconds |
-| `NUDGE_USER_AGENT` | NudgeBot UA | User-Agent header sent with requests |
-| `NUDGE_PLUGINS` | | modules that register custom checkers |
+## Using Nudge from your own app
 
-## How it works
+Telegram is just one front end. The whole chat interface is a single function, so you can plug Nudge into your
+own AI app, a Discord bot, or a web endpoint:
 
-```
-watches.yaml ──► scheduler (interval / cron) ──► checker (status|keyword|selector|json|change|plugin)
-                                                     │
-.nudge-state.json ◄── last result, fingerprint ◄─────┤
-                                                     ▼
-                                        false→true? ──► Telegram 🔔
-Telegram commands ──► parser (rules / Claude) ──► watches.yaml
+```python
+from nudge.bot import handle_text
+from nudge.config import Settings
+from nudge.store import Store
+
+settings = Settings.from_env()
+store = Store.load(settings.watches_path, settings.state_path)
+reply = handle_text("Amul whey protein in stock at 560001", store, settings, notify=print)
+store.save()
 ```
 
-The code is small enough to read in one sitting: `nudge/engine.py` (scheduling and alert decisions),
-`nudge/checkers/` (checkers), `nudge/nlp.py` (parsing), `nudge/bot.py` (Telegram commands), `nudge/cli.py`.
+Run `nudge run` (or `run_due` from `nudge.engine`) for the scheduling. `nudge list --json` gives you
+machine-readable state.
 
 ## Limitations
 
-- Pages that render their content with JavaScript only show their initial HTML. Point Nudge at the site's JSON
-  API instead; you can usually find it in your browser's network tab.
-- Be polite: use sensible intervals and respect each site's terms. Some sites block automated requests.
+- The BookMyShow and District integrations read public pages, so they can break when those sites change.
+  `nudge doctor` and the 3-failure warning tell you when that happens.
+- Be polite: use sensible intervals (Nudge won't go below 1 minute from Telegram) and respect each site's terms.
 
 ## Development
 
 ```bash
-pip install -e ".[dev,llm]"
+pip install -e ".[dev]"
 pytest
 ```
 
