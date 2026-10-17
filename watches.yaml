@@ -1,1 +1,11 @@
-watches: []
+watches:
+- id: 11002c
+  name: Amul whey protein in stock at 560001
+  url: https://shop.amul.com/en/browse/protein
+  check: amul
+  params:
+    pincode: '560001'
+    product: whey protein
+  interval: 5m
+  enabled: true
+  description: Amul whey protein stock at 560001
