@@ -9,3 +9,23 @@ watches:
   interval: 5m
   enabled: true
   description: Amul whey protein stock at 560001
+- id: 3a672d
+  name: Amul whey protein in stock at 560001
+  url: https://shop.amul.com/en/browse/protein
+  check: amul
+  params:
+    pincode: '560001'
+    product: whey protein
+  interval: 5m
+  enabled: true
+  description: Amul whey protein stock at 560001
+- id: 3eab11
+  name: clayface on District (bengaluru)
+  url: https://www.district.in/movies/
+  check: district
+  params:
+    movie: clayface
+    city: bengaluru
+  interval: 5m
+  enabled: true
+  description: Tell me when "clayface" bookings open on district in bengaluru
