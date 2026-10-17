@@ -17,7 +17,7 @@ name: nudge
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # GitHub may delay scheduled runs; 10 min is a practical floor
+    - cron: "2-59/5 * * * *"   # every 5 min (GitHub minimum), off the :00 rush; runs may still be delayed
   workflow_dispatch:
 
 permissions:
