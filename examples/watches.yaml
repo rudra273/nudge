@@ -14,6 +14,22 @@ watches:
     interval: 5m
     notify_once: true
 
+  # First day, first show: IMAX shows on release day at any PVR. Urgent by default (because of `date`):
+  # the alert repeats until you tap "Got it". New days/cinemas opening later are alerted too (updates).
+  - id: doom01
+    name: Avengers Doomsday FDFS IMAX
+    url: https://www.district.in/movies/
+    check: district
+    params:
+      movie: Avengers Doomsday
+      city: bengaluru
+      date: release            # or 2026-12-18, or a list of dates
+      format: IMAX             # or [IMAX, 4DX]
+      cinema: PVR              # a chain, a cinema ("PVR Orion"), or a list
+      # language: English
+      # updates: false         # only the first alert
+    interval: 2m
+
   # Movie bookings on BookMyShow (works best from a home connection; see README).
   - id: dune3
     name: Dune Part Three on BookMyShow

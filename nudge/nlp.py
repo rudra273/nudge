@@ -52,6 +52,14 @@ class ParseError(ValueError):
     pass
 
 
+class MissingInfo(ParseError):
+    """The request is understood but lacks one thing (city, pincode, movie); `need` says which."""
+
+    def __init__(self, message: str, need: str):
+        super().__init__(message)
+        self.need = need
+
+
 def _interval(text: str, default: str) -> tuple[str | None, str | None]:
     if m := CRON_RE.search(text):
         return None, m.group(1)
@@ -151,7 +159,9 @@ Return ONLY a JSON object: {"check": ..., "url": ..., "name": ..., "params": {..
 Check types and their params:
 - "bookmyshow": movie bookings opening on BookMyShow. params {"movie": title, "city": city}. url may be "".
 - "district": movie bookings opening on District (district.in). params {"movie": title, "city": city,
-  optional "cinema": cinema name}. url may be "".
+  optional "cinema": name or list (a chain like "PVR" matches all its cinemas), optional "date": "YYYY-MM-DD",
+  a list, or "release" for first day first show (FDFS), optional "format": e.g. "IMAX", "4DX", "3D", "Dolby Atmos",
+  optional "language": e.g. "Tamil", optional "urgent": true to repeat the alert until acknowledged}. url may be "".
 - "amul": Amul shop products in stock. params {"pincode": 6 digits, "product": words in product name
   (e.g. "whey", "chocolate whey", "milkshake"; "" for all), optional "category": "protein" (default)}.
 - "booking": any ticket/registration page; alerts when a Book/Buy/Register button is live. params {}.
@@ -212,14 +222,21 @@ _NEEDS_HELP = {
 }
 
 
-def _platform_spec(text: str, default_interval: str) -> dict[str, Any] | None:
+def _platform_spec(text: str, default_interval: str, defaults: dict[str, str] | None = None) -> dict[str, Any] | None:
     from nudge import platforms
 
     spec = platforms.detect(text)
     if not spec:
         return None
+    for need in list(spec.get("needs") or []):
+        value = (defaults or {}).get(need)
+        if value and need in ("city", "pincode"):  # saved with /city or /pincode
+            spec["params"][need] = value
+            spec["needs"].remove(need)
+            spec["name"] += f" ({value})" if need == "city" else f" at {value}"
     explicit_interval, cron = _interval(text, "")
-    spec["interval"] = explicit_interval or (None if cron else ("5m" if spec["check"] != "booking" else "10m"))
+    defaults = {"district": "2m", "booking": "10m"}  # District shows can sell out within the hour
+    spec["interval"] = explicit_interval or (None if cron else defaults.get(spec["check"], "5m"))
     spec["cron"] = cron
     spec["notify_once"] = bool(re.search(r"\bonce\b", text, re.I))
     spec["confident"] = not spec.get("needs")
@@ -227,10 +244,11 @@ def _platform_spec(text: str, default_interval: str) -> dict[str, Any] | None:
 
 
 def parse(text: str, *, llm: "LLMConfig | None" = None, force_llm: bool = False,
-          default_interval: str = "15m") -> Watch:
+          default_interval: str = "15m", defaults: dict[str, str] | None = None) -> Watch:
     """Plain English -> Watch. Rules first (no AI needed); the configured LLM, if any, handles the rest.
 
-    force_llm=True (Telegram /ai) asks the model first.
+    force_llm=True (Telegram /ai) asks the model first. defaults fill a missing city or pincode.
+    Raises MissingInfo when one detail is missing, ParseError when the request isn't understood.
     """
     from nudge.llm import LLMError
 
@@ -255,7 +273,7 @@ def parse(text: str, *, llm: "LLMConfig | None" = None, force_llm: bool = False,
                              "(or NUDGE_LLM_BASE_URL for Ollama), or just describe the watch without /ai.")
         spec = try_llm()  # on failure, fall through to the rules, which may still understand it
     if spec is None:
-        spec = _platform_spec(text, default_interval)
+        spec = _platform_spec(text, default_interval, defaults)
     if spec is None:
         try:
             spec = parse_rules(text, default_interval)
@@ -270,7 +288,7 @@ def parse(text: str, *, llm: "LLMConfig | None" = None, force_llm: bool = False,
         spec = try_llm() or spec
     for need in spec.get("needs") or []:
         if not spec["params"].get(need):
-            raise ParseError(_NEEDS_HELP.get(need, f"Missing {need}."))
+            raise MissingInfo(_NEEDS_HELP.get(need, f"Missing {need}."), need)
     if spec["check"] == "keyword" and not spec["params"].get("text"):
         raise ParseError("What text should I look for? Put it in quotes, e.g. \"Book now\".")
     interval = spec.get("interval") or (None if spec.get("cron") else default_interval)
@@ -279,6 +297,21 @@ def parse(text: str, *, llm: "LLMConfig | None" = None, force_llm: bool = False,
     return Watch(id=new_id(), name=spec["name"], url=spec["url"], check=spec["check"], params=spec["params"],
                  interval=interval,
                  cron=spec.get("cron"), notify_once=spec.get("notify_once", False), description=text)
+
+
+def _movie_filters(p: dict[str, Any]) -> str:
+    from nudge.platforms.common import as_list
+    from nudge.platforms.district import _nice_date
+
+    out = ""
+    dates = as_list(p.get("date"))
+    if dates:
+        out += " on " + ", ".join("release day (FDFS)" if d.lower() == "release" else _nice_date(d) for d in dates)
+    if p.get("format") or p.get("language"):
+        out += " in " + " ".join(as_list(p.get("language")) + as_list(p.get("format")))
+    if p.get("cinema"):
+        out += " at " + " or ".join(as_list(p.get("cinema")))
+    return out
 
 
 def describe(watch: Watch) -> str:
@@ -302,8 +335,7 @@ def describe(watch: Watch) -> str:
             what = f"\"{p['movie']}\" bookings open on {platform} in {str(p.get('city', '')).title()}"
         else:
             what = f"bookings open on this {platform} page"
-        if p.get("cinema"):
-            what += f" at {p['cinema']}"
+        what += _movie_filters(p)
     elif watch.check == "amul":
         what = f"Amul {p.get('product') or p.get('category') or 'protein'} is in stock at {p.get('pincode')}"
     elif watch.check == "booking":

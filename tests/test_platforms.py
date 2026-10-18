@@ -182,14 +182,14 @@ def test_amul_bad_pincode(store):
 
 @pytest.mark.parametrize("text,check,params,interval", [
     ('tell me when "Jailer 2" bookings open on District in Bangalore', "district",
-     {"movie": "Jailer 2", "city": "bengaluru"}, "5m"),
+     {"movie": "Jailer 2", "city": "bengaluru"}, "2m"),
     ("notify me when Jailer 2 tickets open on BookMyShow in Mumbai", "bookmyshow",
      {"movie": "Jailer 2", "city": "mumbai"}, "5m"),
     ("tell me when the tickets for Dune Part Three open on bms in hyderabad every 2 min", "bookmyshow",
      {"movie": "Dune Part Three", "city": "hyderabad"}, "2m"),
     ("The Batman bookings on book my show in gurgaon", "bookmyshow", {"movie": "The Batman", "city": "delhi"}, "5m"),
     ("Jailer 2 on district at PVR Orion in Bengaluru", "district",
-     {"movie": "Jailer 2", "city": "bengaluru", "cinema": "PVR Orion"}, "5m"),
+     {"movie": "Jailer 2", "city": "bengaluru", "cinema": "PVR Orion"}, "2m"),
     ("amul whey protein back in stock at 560001", "amul", {"pincode": "560001", "product": "whey protein"}, "5m"),
     ("notify when amul protein is in stock pincode 400001 every 10 min", "amul", {"pincode": "400001"}, "10m"),
 ])
@@ -215,3 +215,155 @@ def test_district_and_bms_urls():
     assert w.check == "district"
     w = nlp.parse("https://in.bookmyshow.com/movies/bengaluru/jailer-2/ET00412345 once")
     assert w.check == "bookmyshow" and w.notify_once
+
+
+# -- District: the embedded schedule (__NEXT_DATA__) ---------------------------------
+
+from fixtures.district_next_data import GROUP_HI, GROUP_TA, cinema, page, session  # noqa: E402
+
+from nudge.platforms import district  # noqa: E402
+from nudge.platforms.common import extract_movie_filters, match_cinema  # noqa: E402
+
+MV = f"{D}/movies/test-movie-movie-tickets-in-bengaluru-MV176735"
+DAY1, DAY2 = "2026-12-18", "2026-12-19"
+ORION = cinema(1, "PVR Orion Mall, Dr Rajkumar Road, Bengaluru", "PVR",
+               [session(1, f"{DAY1}T06:00", 11, fmt="IMAX 3D", avail=12, total=180, status="Filling Fast"),
+                session(1, f"{DAY1}T12:30", 12), session(1, f"{DAY1}T09:30", 13)])
+LIDO = cinema(2, "INOX Lido Mall, Ulsoor, Bengaluru", "PVR",  # District files INOX under the PVR chain
+              [session(2, f"{DAY1}T07:00", 21, avail=0, status="Sold Out")])
+CINEPOLIS = cinema(3, "Cinepolis Orion Avenue Mall, Banaswadi, Bengaluru", "Cinepolis",
+                   [session(3, f"{DAY2}T10:00", 31, fmt="4DX")])
+
+
+def district_watch(**params):
+    return Watch(id="d", name="Test", url=MV, check="district", params=params)
+
+
+def test_district_schedule_upcoming_shows_release_date(web):
+    web.set(MV, page())
+    r = get_checker("district")(district_watch(), ctx(web))
+    assert not r.matched and r.summary == "No shows yet (releasing Fri 18 Dec)"
+
+
+def test_district_schedule_alerts_with_grouped_shows_and_seat_link(web):
+    web.set(MV, page(show_dates=[DAY1], cinemas=[ORION, LIDO]))
+    r = get_checker("district")(district_watch(), ctx(web))
+    assert r.matched and not r.edge
+    lines = r.summary.splitlines()
+    assert lines[0] == "Test Movie: bookings open!" and lines[1] == "📅 Fri 18 Dec"
+    assert "• PVR Orion Mall, Dr Rajkumar Road: 06:00 AM IMAX 3D (12/180 left, filling fast), 09:30 AM, 12:30 PM" in lines
+    assert "• INOX Lido Mall, Ulsoor: 07:00 AM (sold out)" in lines
+    # the earliest show that isn't sold out, straight to seat selection
+    assert r.link == (f"{D}/movies/seat-layout/{GROUP_TA}?encsessionid=1-11-x-1&freeseating=false"
+                      "&fromsessions=true&type=MOVIES&contentid=176735")
+
+
+def test_district_updates_alert_only_on_new_days_and_cinemas(web):
+    memo = {}
+    web.set(MV, page(show_dates=[DAY1], cinemas=[ORION]))
+    assert get_checker("district")(district_watch(), ctx(web, memo)).matched
+    again = get_checker("district")(district_watch(), ctx(web, memo))
+    assert not again.matched and "no change" in again.summary
+    web.set(MV, page(show_dates=[DAY1], cinemas=[ORION, LIDO]))
+    r = get_checker("district")(district_watch(), ctx(web, memo))
+    assert r.matched and "more shows open" in r.summary and "INOX Lido" in r.summary and "Orion" not in r.summary
+
+
+def test_district_updates_off_is_a_plain_edge_alert(web):
+    web.set(MV, page(show_dates=[DAY1], cinemas=[ORION]))
+    r = get_checker("district")(district_watch(updates=False), ctx(web))
+    assert r.matched and r.edge
+
+
+def test_district_release_date_filter_fetches_only_open_days(web):
+    web.set(MV, page(show_dates=["2026-12-17"], release=DAY1,
+                     cinemas=[cinema(1, "PVR Orion", "PVR", [session(1, "2026-12-17T21:00", 1)])]))
+    r = get_checker("district")(district_watch(date="release"), ctx(web))
+    assert not r.matched and "not yet for Fri 18 Dec" in r.summary
+    assert web.calls == [MV]  # a closed day costs no request
+    web.set(MV, page(show_dates=["2026-12-17", DAY1], release=DAY1,
+                     cinemas=[cinema(1, "PVR Orion", "PVR", [session(1, "2026-12-17T21:00", 1)])]))
+    web.set(f"{MV}?frmtid={GROUP_TA}&fromdate={DAY1}", page(show_dates=["2026-12-17", DAY1], release=DAY1,
+                                                            cinemas=[ORION], search_date=DAY1))
+    r = get_checker("district")(district_watch(date="release"), ctx(web))
+    assert r.matched and "Fri 18 Dec" in r.summary and "Thu 17 Dec" not in r.summary
+
+
+def test_district_cinema_format_and_language_filters(web):
+    web.set(MV, page(show_dates=[DAY1, DAY2], cinemas=[ORION, LIDO]))
+    web.set(f"{MV}?frmtid={GROUP_TA}&fromdate={DAY2}", page(show_dates=[DAY1, DAY2], cinemas=[CINEPOLIS],
+                                                            search_date=DAY2))
+    check = get_checker("district")
+    r = check(district_watch(cinema="PVR"), ctx(web))
+    assert r.matched and "PVR Orion" in r.summary and "INOX" not in r.summary  # chain key is ignored
+    r = check(district_watch(cinema=["inox lido", "cinepolis orion"]), ctx(web))
+    assert "INOX Lido" in r.summary and "Cinepolis Orion Avenue Mall" in r.summary and "PVR" not in r.summary
+    r = check(district_watch(format="IMAX"), ctx(web))
+    assert r.matched and "06:00 AM IMAX 3D" in r.summary and "09:30" not in r.summary
+    assert "4DX" in check(district_watch(format="4dx"), ctx(web)).summary
+    r = check(district_watch(format="Dolby Atmos"), ctx(web))
+    assert not r.matched and "no shows matching your filters" in r.summary
+
+    two = ((GROUP_TA, "Tamil"), (GROUP_HI, "Hindi"))
+    web.set(MV, page(show_dates=[DAY1], cinemas=[ORION], groups=two))
+    web.set(f"{MV}?frmtid={GROUP_HI}&fromdate={DAY1}", page(
+        show_dates=[DAY1], groups=two, group=GROUP_HI, search_date=DAY1,
+        cinemas=[cinema(4, "PVR Forum", "PVR", [session(4, f"{DAY1}T08:00", 41, group=GROUP_HI)])]))
+    r = check(district_watch(language="Hindi"), ctx(web))
+    assert r.matched and "PVR Forum" in r.summary and "Orion" not in r.summary
+
+
+def test_match_cinema():
+    assert match_cinema("PVR Orion", "PVR: Orion Mall, Dr Rajkumar Road")
+    assert match_cinema("pvr", "PVR Nexus (Formerly Forum), Koramangala")
+    assert match_cinema("any cinepolis", "Cinépolis Orion Avenue Mall")
+    assert not match_cinema("PVR Orion", "INOX Lido Mall")
+
+
+def test_find_movies_offers_every_match(web):
+    web.set(f"{D}/movies/upcoming-movies-in-bengaluru", DISTRICT_LISTING)
+    found = district.find_movies(ctx(web), "Jailer", "bengaluru")
+    assert found[0].endswith("jailer-movie-tickets-in-bengaluru-MV100001")  # exact title wins
+    web.set(f"{D}/movies/", "<html></html>")
+    found = district.find_movies(ctx(web), "Varanasi", "bengaluru")
+    assert found == [f"{D}/movies/varanasi-movie-tickets-in-bengaluru-MV209276"]
+
+
+@pytest.mark.parametrize("text,params", [
+    ("Avengers Doomsday IMAX FDFS on District at any PVR in Bangalore",
+     {"movie": "Avengers Doomsday", "city": "bengaluru", "cinema": "PVR", "date": "release", "format": "IMAX"}),
+    ('"Jailer 2" Tamil 4DX on district at PVR Orion or INOX Garuda in chennai on 18 Dec, urgent',
+     {"movie": "Jailer 2", "city": "chennai", "cinema": ["PVR Orion", "INOX Garuda"], "date": "2026-12-18",
+      "format": "4DX", "language": "Tamil", "urgent": True}),
+    ("Ice Age on district at \"Sathyam Cinemas\" in Chennai first day first show",
+     {"movie": "Ice Age", "city": "chennai", "cinema": "Sathyam Cinemas", "date": "release"}),
+    ("Leo on district at Rohini Silver Screens in Chennai",
+     {"movie": "Leo", "city": "chennai", "cinema": "Rohini Silver Screens"}),
+])
+def test_district_movie_requests(text, params, monkeypatch):
+    from datetime import date
+
+    monkeypatch.setattr("nudge.platforms.common.today_ist", lambda: date(2026, 10, 18))
+    w = nlp.parse(text)
+    assert (w.check, w.params, w.interval) == ("district", params, "2m")
+
+
+def test_movie_filter_dates():
+    from datetime import date
+
+    today = date(2026, 10, 18)  # a Sunday
+    assert extract_movie_filters("x on friday", today)[0] == {"date": "2026-10-23"}
+    assert extract_movie_filters("x for 2 jan", today)[0] == {"date": "2027-01-02"}  # next occurrence
+    assert extract_movie_filters("x on Dec 24th 2026", today)[0] == {"date": "2026-12-24"}
+    assert extract_movie_filters("x on 25/12", today)[0] == {"date": "2026-12-25"}
+    assert extract_movie_filters("x tomorrow", today)[0] == {"date": "2026-10-19"}
+    params, rest = extract_movie_filters('"Ice Age" in ICE and Dolby Atmos', today)
+    assert params == {"format": ["Dolby Atmos", "ICE"]} and '"Ice Age"' in rest
+
+
+def test_district_defaults_fill_city():
+    w = nlp.parse("Doomsday IMAX FDFS on District", defaults={"city": "bengaluru"})
+    assert w.params["city"] == "bengaluru" and "(bengaluru)" in w.name
+    with pytest.raises(nlp.MissingInfo) as exc:
+        nlp.parse("Doomsday on District")
+    assert exc.value.need == "city"

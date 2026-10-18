@@ -14,11 +14,13 @@ from nudge.checkers import CheckContext, CheckResult, get_checker
 from nudge.checkers.base import BROWSER_UA, Fetcher, http_fetch
 from nudge.models import Watch, parse_duration
 from nudge.store import Store
-from nudge.telegram import esc
+from nudge.telegram import Message, button, esc
 
 log = logging.getLogger(__name__)
 
 ERROR_ALERT_AFTER = 3  # consecutive failures before sending an error nudge
+REMIND_EVERY = 180  # seconds between reminders of an urgent alert nobody acknowledged
+REMIND_MAX = 5
 
 Notify = Callable[[str], None]
 
@@ -45,11 +47,32 @@ class Outcome:
     notified: bool = False
 
 
-def format_alert(watch: Watch, result: CheckResult) -> str:
-    lines = [f"🔔 <b>{esc(watch.name)}</b>", esc(result.summary), f"🔗 {esc(result.link or watch.url)}"]
+def is_urgent(watch: Watch) -> bool:
+    """Urgent alerts repeat until acknowledged. Default: District watches for a specific date (FDFS)."""
+    return bool(watch.params.get("urgent", watch.check == "district" and bool(watch.params.get("date"))))
+
+
+def alert_buttons(watch: Watch, link: str | None, urgent: bool = False):
+    rows = []
+    if link and link.startswith("http"):
+        rows.append([button("🎟 Book now" if watch.check in ("district", "bookmyshow", "booking") else "🔗 Open",
+                            url=link)])
+    actions = [button("✅ Got it", f"ack:{watch.id}")] if urgent else []
+    actions += [button("🔁 Check", f"chk:{watch.id}"), button("⏸ Pause", f"pause:{watch.id}")]
+    rows.append(actions)
+    if watch.check == "district" and watch.params.get("updates", True) is not False:
+        rows.append([button("🔕 Stop updates", f"upd:{watch.id}:0")])
+    return rows
+
+
+def format_alert(watch: Watch, result: CheckResult, urgent: bool = False) -> Message:
+    link = result.link or watch.url
+    lines = [f"🔔 <b>{esc(watch.name)}</b>", esc(result.summary), f"🔗 {esc(link)}"]
     if watch.notify_once:
         lines.append("<i>Watch paused (notify once). /resume " + esc(watch.id) + " to re-arm.</i>")
-    return "\n".join(lines)
+    if urgent:
+        lines.append("<i>I'll keep reminding you until you tap ✅ Got it.</i>")
+    return Message("\n".join(lines), alert_buttons(watch, link, urgent))
 
 
 def format_error(watch: Watch, error: str, count: int) -> str:
@@ -78,6 +101,7 @@ def run_watch(store: Store, watch: Watch, notify: Notify | None = None, *, now: 
         return Outcome(watch, None, error=error)
 
     was_matched = bool(state.get("matched"))
+    recovered = state.get("errors", 0) >= ERROR_ALERT_AFTER
     state.update(matched=result.matched, summary=result.summary, errors=0)
     if memo:
         state["memo"] = memo
@@ -87,13 +111,20 @@ def run_watch(store: Store, watch: Watch, notify: Notify | None = None, *, now: 
     if result.fingerprint is not None:
         state["fingerprint"] = result.fingerprint
 
+    if recovered and notify:
+        notify(f"✅ <b>{esc(watch.name)}</b> is working again\n{esc(result.summary)}")
+
     fire = result.matched and (not result.edge or not was_matched)
     if fire:
         state["last_notified"] = now
         if watch.notify_once:
             store.set_enabled(watch.id, False)
+        urgent = is_urgent(watch)
+        alert = format_alert(watch, result, urgent)
+        if urgent:
+            state["unacked"] = {"text": str(alert), "link": result.link or watch.url, "at": now, "count": 0}
         if notify:
-            notify(format_alert(watch, result))
+            notify(alert)
     log.info("[%s] %s: %s%s", watch.id, watch.name, result.summary, " (notified)" if fire else "")
     return Outcome(watch, result, notified=fire)
 
@@ -107,4 +138,25 @@ def run_due(store: Store, notify: Notify | None = None, *, now: float | None = N
             continue
         if force or is_due(watch, store.state_for(watch), now, grace):
             outcomes.append(run_watch(store, watch, notify, now=now, **kwargs))
+    remind_unacked(store, notify, now=now)
     return outcomes
+
+
+def remind_unacked(store: Store, notify: Notify | None, *, now: float | None = None) -> int:
+    """Re-send urgent alerts until someone taps ✅ Got it (every REMIND_EVERY, at most REMIND_MAX times)."""
+    now = time.time() if now is None else now
+    sent = 0
+    for watch in store.watches:
+        state = store.state_for(watch)
+        pending = state.get("unacked")
+        if not pending or now - pending.get("at", 0) < REMIND_EVERY:
+            continue
+        pending["count"] = pending.get("count", 0) + 1
+        pending["at"] = now
+        if notify:
+            notify(Message(f"⏰ <b>Reminder {pending['count']}/{REMIND_MAX}</b>\n{pending['text']}",
+                           alert_buttons(watch, pending.get("link"), urgent=True)))
+            sent += 1
+        if pending["count"] >= REMIND_MAX:
+            state.pop("unacked", None)
+    return sent

@@ -33,12 +33,43 @@ nudge → 🔔 Jailer 2 on District (bengaluru)
 
 | Platform | Say | How it checks |
 |---|---|---|
-| **District** (district.in) | `"Jailer 2" on District in Bengaluru`<br>`Jailer 2 on district at PVR Orion in Bangalore` | Finds the movie's city page and alerts when showtimes appear, optionally at one cinema |
+| **District** (district.in) | `"Jailer 2" on District in Bengaluru`<br>`Avengers Doomsday IMAX FDFS on District at any PVR in Bangalore` | Reads the movie's full schedule and alerts when shows open, filtered by day, format, language and cinema (see below) |
 | **BookMyShow** | `Dune Part Three on BookMyShow in Mumbai` | Alerts when the movie shows up in the city's now-booking list. With a movie URL, alerts when the Book button or ticket link appears |
 | **Amul shop** | `Amul whey protein in stock at 560001`<br>`amul protein at 400001` | Uses the shop's own stock API for your pincode. Alerts for each matching product that comes back in stock |
 | **Any ticket page** | paste the link (District events, Insider, college fests…) | Alerts when a "Book tickets", "Buy now" or "Register now" button goes live |
 
 Cities are understood by common names: Bangalore, Bengaluru, Bombay, Gurgaon (counts as Delhi NCR), Madras and so on.
+
+### First day, first show (District)
+
+District movie pages carry the whole schedule: which days are open, every cinema, every show's screen format and
+seats left. Nudge reads it every 2 minutes and alerts the moment matching shows open, with a **🎟 Book now** button
+that goes straight to seat selection for the earliest show.
+
+| Add to your request | Watches for |
+|---|---|
+| `FDFS`, `first day`, `release day`, `on 18 Dec`, `on Friday`, `tomorrow` | shows on that day (`date`: an ISO date, a list, or `release`) |
+| `IMAX`, `4DX`, `3D`, `Dolby Atmos`, `ScreenX`, `PXL`, `ICE` | that screen format (`format`) |
+| `Tamil`, `Telugu`, `Hindi`, `English`… | that language version (`language`) |
+| `at PVR Orion`, `at PVR Orion or INOX Garuda`, `at any PVR`, `at "Sathyam Cinemas"` | those cinemas, matched loosely (`cinema`) |
+| `urgent` | repeat the alert every 3 minutes (up to 5 times) until you tap **✅ Got it** |
+
+```
+you   → Avengers Doomsday IMAX FDFS on District at any PVR in Bangalore
+nudge → 👀 Watching Avengers Doomsday [FDFS · IMAX] on District (bengaluru)
+        Now: No shows yet (releasing Fri 18 Dec)
+  …
+nudge → 🔔 Avengers Doomsday [FDFS · IMAX] on District (bengaluru)
+        Avengers: Doomsday: bookings open!
+        📅 Fri 18 Dec
+        • PVR Orion Mall, Dr Rajkumar Road: 06:00 AM IMAX 3D (12/180 left, filling fast), 09:30 AM IMAX 3D
+        [🎟 Book now]  [✅ Got it] [🔁 Check] [⏸ Pause]  [🔕 Stop updates]
+```
+
+- After the first alert you also hear about **new days and cinemas** as they open (turn it off with
+  **🔕 Stop updates**, or `updates: false`).
+- Watches for a specific day (like FDFS) are **urgent by default**: the alert repeats until you tap ✅ Got it.
+- A title that matches several films ("Jailer" and "Jailer 2") gets a "Which one?" question with buttons.
 
 > **About BookMyShow:** it uses Cloudflare and blocks many datacenter IPs, including cloud servers and GitHub
 > Actions. From a home connection it usually works. If it's blocked, Nudge tells you so (it never sends a false
@@ -79,14 +110,17 @@ Then just chat with your bot.
 | Command | |
 |---|---|
 | any text, or `/watch <request>` | add a watch, which runs its first check immediately |
-| `/list` | your watches, with status |
+| `/list` | your watches; tap one for its card: check now, pause/resume, interval, new-show alerts, remove |
 | `/check <id>` | run a check now |
 | `/pause <id>` · `/resume <id>` · `/remove <id>` | manage a watch (`/resume` re-arms the alert) |
 | `/every <id> <interval>` | change how often it checks, e.g. `/every a1b2 2m` |
+| `/city <name>` · `/pincode <pin>` | defaults for requests that don't name one (`Doomsday on District` just works) |
 | `/ai <request>` | have the configured AI parse the request |
 | `/status` | health: active watches, AI provider, browser mode |
 | `/help` | examples |
 
+Alerts and replies come with buttons (**🎟 Book now**, **🔁 Check**, **⏸ Pause**…), so you rarely need to type an id.
+If something is missing ("Which city?"), just reply with the answer, or tap one of the suggested cities.
 `<id>` can also be a unique id prefix or the watch's exact name. Only chats listed in `TELEGRAM_CHAT_ID` can use the
 bot. Anyone else is told the instance is private, and shown their chat id.
 
@@ -142,7 +176,7 @@ stays blocked.
 
 | `check` | Matches when | `params` |
 |---|---|---|
-| `district` | the movie has showtimes on District | `movie`, `city`, `cinema` (or a District movie URL) |
+| `district` | the movie has shows on District | `movie`, `city` (or a District movie URL); filters `date`, `format`, `language`, `cinema`; `updates`, `urgent` |
 | `bookmyshow` | the movie is booking on BookMyShow | `movie`, `city` (or a BookMyShow movie/event URL) |
 | `amul` | a matching product is in stock (one alert per newly stocked product) | `pincode`, `product`, `category` (`protein`) |
 | `booking` | a Book/Buy/Register button is live | `open_text`, `closed_text`, `showtimes: true` |
@@ -204,11 +238,13 @@ cp .env.example .env && docker compose up -d        # watches and state live in 
 
 **GitHub Actions (free, no server):** see the setup notes at the top of
 [`.github/workflows/nudge.yml`](.github/workflows/nudge.yml). Add the secrets, set the repo variable
-`NUDGE_ENABLED=true`, and you're done. Bot replies arrive on the next run (every ~10 minutes), and BookMyShow is
-usually blocked there.
+`NUDGE_ENABLED=true`, and you're done. Each run stays up for 8 minutes (`--listen 8m`), so checks keep their own
+schedule (District movies every 2 minutes) and the bot answers within seconds. Trigger it every 10 minutes (GitHub's
+own schedule, or an external cron such as cron-job.org calling `workflow_dispatch`) and it's effectively always on.
+BookMyShow is usually blocked there.
 
 **Cron or any scheduler:** `nudge run --once --grace 1m` does one pass: it handles bot messages, runs the checks
-that are due, and exits.
+that are due, and exits. Add `--listen 8m` to keep running (checks and bot replies) for 8 minutes before exiting.
 
 ## Configuration
 

@@ -8,7 +8,7 @@
 #        NUDGE_ENABLED = true
 #   3. Commit a watches.yaml (see examples/watches.yaml) or add watches by messaging your bot.
 #
-# Each run handles pending Telegram commands, runs due checks, keeps runtime state in the
+# Each run stays up for ~8 minutes (--listen): it answers Telegram, runs due checks, keeps runtime state in the
 # Actions cache, and commits watches.yaml back only when watches were added/changed.
 #
 # Note: BookMyShow usually blocks GitHub's datacenter IPs. Amul, District and most sites work fine;
@@ -31,7 +31,7 @@ jobs:
   check:
     if: vars.NUDGE_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +51,9 @@ jobs:
           restore-keys: nudge-state-
 
       - name: Run checks
-        run: nudge run --once --grace 5m
+        # Stay up for 8 minutes: checks run on their own schedule (District movies every 2m) and bot
+        # replies/buttons are answered within seconds. Trigger every 10m (or more often: runs queue).
+        run: nudge run --once --listen 8m --grace 2m
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -75,5 +77,6 @@ jobs:
             git config user.email "nudge-bot@users.noreply.github.com"
             git add watches.yaml
             git commit -m "nudge: update watches"
+            git pull --rebase --autostash   # runs are long now; someone may have pushed meanwhile
             git push
           fi

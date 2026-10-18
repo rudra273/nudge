@@ -5,11 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import signal
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -20,13 +19,9 @@ from nudge.config import Settings
 from nudge.engine import next_run, run_due, run_watch
 from nudge.models import Watch, new_id, parse_duration
 from nudge.store import Store
-from nudge.telegram import Telegram
+from nudge.telegram import Telegram, strip_html
 
 log = logging.getLogger("nudge")
-
-
-def _strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 class App:
@@ -43,7 +38,7 @@ class App:
         if self.tg and self.tg.chat_ids:
             self.tg.send(message)
         else:
-            print(_strip_html(message), flush=True)
+            print(strip_html(message), flush=True)
 
     @property
     def check_kwargs(self) -> dict[str, Any]:
@@ -115,7 +110,8 @@ def cmd_list(app: App, args: argparse.Namespace) -> int:
         print(f"{w.id:<7} {status:<8} {w.check:<9} {w.schedule:<16} {nxt_s:<8} {w.name}")
         last = st.get("last_error") or st.get("summary")
         if last:
-            print(f"{'':<7} └ {last[:110]}")
+            first, *more = last.splitlines()
+            print(f"{'':<7} └ {first[:110]}" + (f" (+{len(more)} lines)" if more else ""))
     return 0
 
 
@@ -173,9 +169,32 @@ def tick(app: App, grace: float = 0.0, poll_timeout: int = 0) -> None:
     store.save()
 
 
+def _loop(app: App, grace: float, deadline: float | None = None, should_stop: Callable[[], bool] = lambda: False) -> None:
+    """Tick until stopped (or until `deadline`, epoch seconds): run due checks, answer Telegram in between."""
+    while not should_stop() and (deadline is None or time.time() < deadline):
+        started = time.time()
+        tick_end = started + app.settings.tick_seconds
+        if deadline is not None:
+            tick_end = min(tick_end, deadline)
+        # In a bounded run, only the last tick looks ahead: due-soon checks shouldn't wait for the next run.
+        last = deadline is not None and tick_end + app.settings.tick_seconds > deadline
+        try:
+            tick(app, grace=grace if deadline is None or last else 0.0, poll_timeout=0)
+            # With Telegram, long-poll for commands during the idle part of the tick: instant replies, low CPU.
+            while app.tg and not should_stop() and time.time() < tick_end - 1:
+                store = app.store()
+                remaining = int(tick_end - time.time())
+                process_updates(app.tg, store, app.settings, timeout=max(1, min(remaining, 25)))
+                store.save()  # persists the new update offset and any watch changes
+        except Exception:  # keep the daemon alive on unexpected errors
+            log.exception("tick failed")
+        while not should_stop() and time.time() < tick_end:
+            time.sleep(0.5)
+
+
 def cmd_run(app: App, args: argparse.Namespace) -> int:
     grace = parse_duration(args.grace)
-    if args.once:
+    if args.once and not args.listen:
         tick(app, grace=grace)
         return 0
     stop = False
@@ -186,27 +205,16 @@ def cmd_run(app: App, args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    log.info("Nudge %s running: %s, tick %ss, telegram %s, AI %s", __version__, app.settings.watches_path,
+    deadline = time.time() + parse_duration(args.listen) if args.listen else None
+    log.info("Nudge %s running: %s, tick %ss, telegram %s, AI %s%s", __version__, app.settings.watches_path,
              app.settings.tick_seconds, "on" if app.tg else "off",
-             app.settings.llm.label if app.settings.llm else "off (rules only)")
+             app.settings.llm.label if app.settings.llm else "off (rules only)",
+             f", listening for {args.listen}" if deadline else "")
     if app.tg:
         app.tg.set_commands(COMMANDS)
     if app.tg and not app.tg.chat_ids:
         log.warning("TELEGRAM_CHAT_ID is not set: message your bot and it will reply with your chat id")
-    while not stop:
-        started = time.time()
-        try:
-            # With Telegram, long-poll for commands during the idle part of the tick: instant replies, low CPU.
-            tick(app, grace=grace, poll_timeout=0)
-            while app.tg and not stop and time.time() - started < app.settings.tick_seconds - 1:
-                store = app.store()
-                remaining = int(app.settings.tick_seconds - (time.time() - started))
-                process_updates(app.tg, store, app.settings, timeout=max(1, min(remaining, 25)))
-                store.save()  # persists the new update offset and any watch changes
-        except Exception:  # keep the daemon alive on unexpected errors
-            log.exception("tick failed")
-        while not stop and time.time() - started < app.settings.tick_seconds:
-            time.sleep(0.5)
+    _loop(app, grace, deadline, lambda: stop)
     log.info("Nudge stopped")
     return 0
 
@@ -331,6 +339,8 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run the scheduler (and Telegram bot) continuously")
     r.add_argument("--once", action="store_true", help="single tick: handle bot messages, run due checks, exit")
     r.add_argument("--grace", default="0s", help="treat checks due within this window as due (useful for cron/CI)")
+    r.add_argument("--listen", metavar="DURATION",
+                   help="keep running (checks + Telegram replies) for this long, then exit, e.g. 8m; for cron/CI")
     r.set_defaults(fn=cmd_run)
 
     d = sub.add_parser("doctor", help="check Telegram, AI and site access")
