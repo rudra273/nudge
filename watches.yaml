@@ -1,14 +1,4 @@
 watches:
-- id: 11002c
-  name: Amul whey protein in stock at 560001
-  url: https://shop.amul.com/en/browse/protein
-  check: amul
-  params:
-    pincode: '560001'
-    product: whey protein
-  interval: 5m
-  enabled: true
-  description: Amul whey protein stock at 560001
 - id: 3a672d
   name: Amul whey protein in stock at 560001
   url: https://shop.amul.com/en/browse/protein
@@ -29,3 +19,23 @@ watches:
   interval: 5m
   enabled: true
   description: Tell me when "clayface" bookings open on district in bengaluru
+- id: f47c70
+  name: doomsday on District (bengaluru)
+  url: https://www.district.in/movies/
+  check: district
+  params:
+    movie: doomsday
+    city: bengaluru
+  interval: 2m
+  enabled: true
+  description: '"doomsday" district on bengaluru'
+- id: 1e0ade
+  name: Jailer 2 on District (bengaluru)
+  url: https://www.district.in/movies/
+  check: district
+  params:
+    movie: Jailer 2
+    city: bengaluru
+  interval: 2m
+  enabled: true
+  description: Jailer 2 in bengaluru on district
