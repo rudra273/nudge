@@ -1,13 +1,19 @@
 """Small District movie pages shaped like the live __NEXT_DATA__ (trimmed to the fields Nudge reads)."""
 
 import json
+from datetime import datetime, timedelta
 
 GROUP_TA = "grpta000001"
 GROUP_HI = "grphi000002"
 
 
+def utc(ist: str) -> str:
+    """District's showTime is UTC; tests write the IST time a moviegoer sees."""
+    return (datetime.fromisoformat(ist) - timedelta(hours=5, minutes=30)).strftime("%Y-%m-%dT%H:%M")
+
+
 def session(cid, when, sid, fmt="2D", avail=100, total=200, status="Available", premium="", group=GROUP_TA):
-    return {"sid": str(sid), "cid": cid, "showTime": when, "scrnFmt": fmt, "premiumLabel": premium, "audi": "AUDI 1",
+    return {"sid": str(sid), "cid": cid, "showTime": utc(when), "scrnFmt": fmt, "premiumLabel": premium, "audi": "AUDI 1",
             "avail": avail, "total": total, "seatStatus": status, "mcd": group, "encSessionId": f"{cid}-{sid}-x-{cid}"}
 
 

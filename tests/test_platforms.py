@@ -263,10 +263,19 @@ def test_district_updates_alert_only_on_new_days_and_cinemas(web):
     web.set(MV, page(show_dates=[DAY1], cinemas=[ORION]))
     assert get_checker("district")(district_watch(), ctx(web, memo)).matched
     again = get_checker("district")(district_watch(), ctx(web, memo))
-    assert not again.matched and "no change" in again.summary
+    assert again.matched and again.edge and "no new days or cinemas" in again.summary  # stays ✅, no re-alert
     web.set(MV, page(show_dates=[DAY1], cinemas=[ORION, LIDO]))
     r = get_checker("district")(district_watch(), ctx(web, memo))
     assert r.matched and "more shows open" in r.summary and "INOX Lido" in r.summary and "Orion" not in r.summary
+
+
+def test_district_show_times_are_ist_not_utc(web):
+    # showTime 2026-12-17T22:30 is UTC: a 4 AM first-day show on the 18th in India
+    early = cinema(1, "PVR Orion", "PVR", [session(1, f"{DAY1}T04:00", 1)])
+    assert early["sessions"][0]["showTime"] == "2026-12-17T22:30"
+    web.set(MV, page(show_dates=[DAY1], release=DAY1, cinemas=[early]))
+    r = get_checker("district")(district_watch(date="release"), ctx(web))
+    assert r.matched and "📅 Fri 18 Dec" in r.summary and "04:00 AM" in r.summary
 
 
 def test_district_updates_off_is_a_plain_edge_alert(web):

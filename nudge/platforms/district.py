@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from nudge.checkers import checker
@@ -95,11 +95,15 @@ def _walk(node: Any):
             yield from _walk(v)
 
 
-def _clock(iso: str) -> str:
+IST = timedelta(hours=5, minutes=30)
+
+
+def _local(iso: str) -> datetime | None:
+    """District's showTime is UTC (the page renders it in IST): 2026-10-20T01:00 is a 06:30 AM show."""
     try:
-        return datetime.strptime(iso[:16], "%Y-%m-%dT%H:%M").strftime("%I:%M %p")
+        return datetime.strptime(iso[:16], "%Y-%m-%dT%H:%M") + IST
     except ValueError:
-        return iso[11:16]
+        return None
 
 
 def _int(v: Any) -> int | None:
@@ -151,15 +155,16 @@ def parse_page(html: str, content_id: str = "") -> Schedule | None:
         for cinema in (page.get("nearbyCinemas") or []) + (page.get("farCinemas") or []):
             info = cinema.get("cinemaInfo") or {}
             for s in cinema.get("sessions") or []:
-                when = str(s.get("showTime") or "")
-                if not ISO_DATE_RE.match(when[:10]):
+                local = _local(str(s.get("showTime") or ""))
+                if not local:
                     continue
+                when = local.strftime("%Y-%m-%dT%H:%M")
                 gid = str(s.get("mcd") or group)
                 book = ""
                 if s.get("encSessionId"):
                     book = (f"{BASE}/movies/seat-layout/{gid}?encsessionid={s['encSessionId']}&freeseating=false"
                             f"&fromsessions=true&type=MOVIES&contentid={content_id}")
-                show = Show(date=when[:10], time=_clock(when), when=when[:16], cinema=str(info.get("name") or info.get("label") or ""),
+                show = Show(date=when[:10], time=local.strftime("%I:%M %p"), when=when, cinema=str(info.get("name") or info.get("label") or ""),
                             cinema_id=str(s.get("cid") or cinema.get("id") or ""), chain=str(info.get("chainKey") or ""),
                             fmt=str(s.get("scrnFmt") or ""),
                             extra=" ".join(str(s.get(k) or "") for k in ("premiumLabel", "audi")),
@@ -312,8 +317,9 @@ def _check_schedule(watch, ctx: CheckContext, url: str, schedule: Schedule, page
     ctx.memo["seen"] = sorted(u for u in seen | set(units) if u[:10] >= today)
     new = [s for s in matching if f"{s.date}|{s.cinema_id}" not in seen]
     if not new:
-        return CheckResult(False, f"Bookings open: {len(details['dates'])} day(s), {details['cinemas']} cinema(s) "
-                                  f"(no change)", link=url, edge=False, details=details)
+        # Still open, nothing new: stay matched (so /list shows ✅) but only alert again after a resume re-arms it.
+        return CheckResult(True, f"{title}: bookings open (no new days or cinemas since the last alert)\n"
+                                 f"{format_shows(matching)}", link=link, details=details)
     head = f"{title}: bookings open!" if not seen else f"{title}: more shows open"
     return CheckResult(True, f"{head}\n{format_shows(new)}", link=link, edge=False, details=details)
 
